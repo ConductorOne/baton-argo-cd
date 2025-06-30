@@ -1,5 +1,8 @@
 name: ci
-on: pull_request
+
+on:
+  pull_request:
+
 jobs:
   go-lint:
     runs-on: ubuntu-latest
@@ -11,94 +14,117 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Run linters
-        uses: golangci/golangci-lint-action@v5
+        uses: golangci/golangci-lint-action@v6
         with:
           version: latest
           args: --timeout=3m
+
   go-test:
     strategy:
       matrix:
         go-version: [1.23.x]
         platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
+    env:
+      URL: ${{ secrets.URL }}
+      ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
     steps:
       - name: Install Go
-        if: success()
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: go tests
-        run: (set -o pipefail && go test -v -covermode=count -json ./... | tee test.json)
-      - name: annotate go tests
+      - name: Run go tests
+        run: (set -o pipefail && go test -v -covermode=atomic -json -race ./... | tee test.json)
+      - name: Annotate go tests
         if: always()
         uses: guyarb/golang-test-annotations@v0.6.0
         with:
           test-results: test.json
 
-  test:
+  integration-test:
     runs-on: ubuntu-latest
-    # Define any services needed for the test suite (or delete this section)
-    # services:
-    #   postgres:
-    #     image: postgres:16
-    #     ports:
-    #       - "5432:5432"
-    #     env:
-    #       POSTGRES_PASSWORD: secretpassword
     env:
       BATON_LOG_LEVEL: debug
-      # Add any environment variables needed to run baton-argo-cd
-      # BATON_BASE_URL: 'http://localhost:8080'
-      # BATON_ACCESS_TOKEN: 'secret_token'
-      # The following parameters are passed to grant/revoke commands
-      # Change these to the correct IDs for your test data
-      CONNECTOR_GRANT: 'grant:entitlement:group:1234:member:user:9876'
-      CONNECTOR_ENTITLEMENT: 'entitlement:group:1234:member'
-      CONNECTOR_PRINCIPAL: 'user:9876'
-      CONNECTOR_PRINCIPAL_TYPE: 'user'
     steps:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.22.x
+          go-version: 1.23.x
+
       - name: Checkout code
         uses: actions/checkout@v4
-      # Install any dependencies here (or delete this)
-      # - name: Install postgres client
-      #   run: sudo apt install postgresql-client
-      # Run any fixture setup here (or delete this)
-      # - name: Import sql into postgres
-      #   run: psql -h localhost --user postgres -f environment.sql
-      #   env:
-      #     PGPASSWORD: secretpassword
-      - name: Build baton-argo-cd
-        run: go build ./cmd/baton-argo-cd
-      - name: Run baton-argo-cd
-        run: ./baton-argo-cd
 
-      - name: Install baton
-        run: ./scripts/get-baton.sh && mv baton /usr/local/bin
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.10.0
 
-      - name: Check for grant before revoking
+      - name: Install ArgoCD
+        run: |
+          kubectl create namespace argocd
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.11.2/manifests/install.yaml
+          kubectl wait --for=condition=ready pod --all -n argocd --timeout=5m
 
-        run:
-          baton grants --entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --output-format=json | jq --exit-status ".grants[].principal.id.resource == \"${{ env.CONNECTOR_PRINCIPAL }}\""
+      - name: Configure ArgoCD
+        run: |
+          kubectl patch configmap argocd-cm -n argocd \
+            --type=merge \
+            -p '{"data":{"accounts.admin":"apiKey"}}'
 
+          kubectl patch configmap argocd-rbac-cm -n argocd \
+            --type=merge \
+            -p '{"data":{"policy.csv":"p, role:admin, applications, *, *, allow\np, role:admin, apikey, *, *, allow\n"}}'
 
-      - name: Revoke grants
-        run: ./baton-argo-cd --revoke-grant="${{ env.CONNECTOR_GRANT }}"
+          kubectl rollout restart deployment argocd-server -n argocd
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=argocd-server -n argocd --timeout=2m
 
-      - name: Check grant was revoked
-        run: ./baton-argo-cd && baton grants --entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --output-format=json | jq --exit-status "if .grants then .grants[]?.principal.id.resource != \"${{ env.CONNECTOR_PRINCIPAL }}\" else . end"
+      - name: Test Connector
+        run: |
+          set -ex
 
-      - name: Grant entitlement
-        # Change the grant arguments to the correct IDs for your test data
-        run: ./baton-argo-cd --grant-entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --grant-principal="${{ env.CONNECTOR_PRINCIPAL }}" --grant-principal-type="${{ env.CONNECTOR_PRINCIPAL_TYPE }}"
+          curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/v2.11.2/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
 
-      - name: Check grant was re-granted
+          echo "Starting port-forward..."
+          kubectl port-forward svc/argocd-server -n argocd 8080:80 >/dev/null 2>&1 &
+          PORT_FORWARD_PID=$!
 
-        run:
-          baton grants --entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --output-format=json | jq --exit-status ".grants[].principal.id.resource == \"${{ env.CONNECTOR_PRINCIPAL }}\""
+          echo "Waiting for port-forward..."
+          for i in {1..30}; do
+              if nc -z 127.0.0.1 8080; then
+                  echo "Port-forward is ready."
+                  break
+              fi
+              sleep 1
+          done
+          if ! nc -z 127.0.0.1 8080; then
+              echo "Port-forward failed to start."
+              kill $PORT_FORWARD_PID
+              exit 1
+          fi
 
+          ARGO_CD_CONFIG="/tmp/argo-config"
+          ARGO_CD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+          argocd login 127.0.0.1:8080 --username admin --password "$ARGO_CD_PASSWORD" --insecure --config "${ARGO_CD_CONFIG}"
+
+          ARGO_CD_TOKEN=$(argocd account generate-token --insecure --server 127.0.0.1:8080 --config "${ARGO_CD_CONFIG}")
+          echo "::add-mask::$ARGO_CD_TOKEN"
+
+          go build -o baton-argo-cd ./cmd/baton-argo-cd
+
+          ./baton-argo-cd \
+            --api-url "http://127.0.0.1:8080" \
+            --access-token "$ARGO_CD_TOKEN" \
+            --log-level debug \
+            --file sync.c1z
+
+          if [ ! -f "sync.c1z" ]; then
+            echo "Error: File sync.c1z was not generated."
+            kill $PORT_FORWARD_PID
+            exit 1
+          fi
+
+          ./baton-argo-cd --help
+
+          echo "Cleaning up port-forward process..."
+          kill $PORT_FORWARD_PID

@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "name": "admin",
+      "enabled": true,
+      "capabilities": ["login"]
+    },
+    {
+      "name": "test-user",
+      "enabled": true,
+      "capabilities": ["login"]
+    }
+  ]
+}
