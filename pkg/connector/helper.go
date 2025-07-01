@@ -1,17 +1,19 @@
 package connector
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
-	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/crypto"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
-// parseAccountResource creates a resource for an account.
+const PasswordMinLength = 12
+
+// parseAccountResource creates a resource for an account with comprehensive user traits including emails.
 func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	tokensStr := ""
 	if len(account.Tokens) > 0 {
@@ -24,96 +26,59 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	profile := map[string]interface{}{
 		"name":         account.Name,
 		"enabled":      account.Enabled,
-		"capabilities": strings.Join(account.Capabilities, client.CommaSeparator),
+		"capabilities": strings.Join(account.Capabilities, ","),
 		"tokens":       tokensStr,
 	}
+	emails := extractEmailsFromAccount(account)
 
 	accountTraits := []resource.UserTraitOption{
 		resource.WithUserProfile(profile),
 	}
 
+	for i, email := range emails {
+		isPrimary := i == 0
+		accountTraits = append(accountTraits, resource.WithEmail(email, isPrimary))
+	}
+
 	return resource.NewUserResource(
 		account.Name,
-		userResourceType,
+		accountResourceType,
 		account.Name,
 		accountTraits,
 	)
 }
 
-// getAccountsMap fetches all accounts from ArgoCD and returns them as a map.
-func getAccountsMap(ctx context.Context, c ArgoCdClient) (map[string]*client.Account, error) {
-	accountsMap := make(map[string]*client.Account)
-	accounts, err := c.GetAccounts(ctx)
-	if err != nil {
-		return nil, err
+// extractEmailsFromAccount attempts to extract email addresses from various sources in the account data
+func extractEmailsFromAccount(account *client.Account) []string {
+	var emails []string
+	emailSet := make(map[string]bool)
+
+	emailSet[account.Name] = true
+
+	for email := range emailSet {
+		emails = append(emails, email)
 	}
-	for _, account := range accounts {
-		accCopy := account
-		accountsMap[accCopy.Name] = accCopy
-	}
-	return accountsMap, nil
+
+	return emails
 }
 
-// getAllUserData fetches all accounts and policy grants from ArgoCD.
-func getAllUserData(ctx context.Context, c ArgoCdClient) (map[string]*client.Account, []*client.PolicyGrant, annotations.Annotations, error) {
-	accountsMap, err := getAccountsMap(ctx, c)
+func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error) {
+	if credentialOptions == nil || credentialOptions.GetRandomPassword() == nil {
+		return "", errors.New("unsupported credential option: only random password is supported")
+	}
+
+	length := credentialOptions.GetRandomPassword().GetLength()
+	if length < PasswordMinLength {
+		length = PasswordMinLength
+	}
+
+	password, err := crypto.GenerateRandomPassword(
+		&v2.CredentialOptions_RandomPassword{
+			Length: length,
+		},
+	)
 	if err != nil {
-		return nil, nil, nil, err
+		return "", err
 	}
-
-	policyGrants, annos, err := c.GetPolicyGrants(ctx)
-	if err != nil {
-		return nil, nil, annos, err
-	}
-
-	return accountsMap, policyGrants, annos, nil
-}
-
-// getUsersForRole returns a list of usernames that have the given role.
-func getUsersForRole(ctx context.Context, c ArgoCdClient, roleName string) ([]string, annotations.Annotations, error) {
-	accountsMap, policyGrants, annos, err := getAllUserData(ctx, c)
-	if err != nil {
-		return nil, annos, err
-	}
-
-	userToRoles := make(map[string][]string)
-	for _, pg := range policyGrants {
-		userToRoles[pg.Subject] = append(userToRoles[pg.Subject], pg.Role)
-	}
-
-	allUserNames := make(map[string]struct{})
-	for name := range accountsMap {
-		allUserNames[name] = struct{}{}
-	}
-	for subject := range userToRoles {
-		allUserNames[subject] = struct{}{}
-	}
-
-	defaultRole, err := c.GetDefaultRole(ctx)
-	if err != nil {
-		return nil, annos, err
-	}
-
-	var usersWithRole []string
-	for userName := range allUserNames {
-		assignedRoles, hasExplicitRoles := userToRoles[userName]
-
-		isGranted := false
-		if hasExplicitRoles {
-			for _, userRole := range assignedRoles {
-				if userRole == roleName {
-					isGranted = true
-					break
-				}
-			}
-		} else if defaultRole != "" && roleName == defaultRole {
-			isGranted = true
-		}
-
-		if isGranted {
-			usersWithRole = append(usersWithRole, userName)
-		}
-	}
-
-	return usersWithRole, annos, nil
+	return password, nil
 }

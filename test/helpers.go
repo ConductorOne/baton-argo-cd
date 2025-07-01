@@ -19,6 +19,7 @@ type MockClient struct {
 	GetRolesFunc        func(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
 	GetPolicyGrantsFunc func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
 	GetDefaultRoleFunc  func(ctx context.Context) (string, error)
+	CreateAccountFunc   func(ctx context.Context, username, email, password string) (*client.Account, annotations.Annotations, error)
 }
 
 // GetAccounts calls the mock method if it is defined.
@@ -41,6 +42,14 @@ func (m *MockClient) GetRoles(ctx context.Context) ([]*client.Role, annotations.
 func (m *MockClient) GetPolicyGrants(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
 	if m.GetPolicyGrantsFunc != nil {
 		return m.GetPolicyGrantsFunc(ctx)
+	}
+	return nil, nil, nil
+}
+
+// CreateAccount calls the mock method if it is defined.
+func (m *MockClient) CreateAccount(ctx context.Context, username, email, password string) (*client.Account, annotations.Annotations, error) {
+	if m.CreateAccountFunc != nil {
+		return m.CreateAccountFunc(ctx, username, email, password)
 	}
 	return nil, nil, nil
 }

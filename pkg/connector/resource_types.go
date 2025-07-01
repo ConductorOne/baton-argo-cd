@@ -6,9 +6,9 @@ import (
 
 // The user resource type is for all user objects from the database.
 var (
-	userResourceType = &v2.ResourceType{
-		Id:          "user",
-		DisplayName: "User",
+	accountResourceType = &v2.ResourceType{
+		Id:          "account",
+		DisplayName: "Account",
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_USER},
 	}
 	roleResourceType = &v2.ResourceType{

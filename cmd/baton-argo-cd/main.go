@@ -49,9 +49,10 @@ func getConnector[T field.Configurable](ctx context.Context, config T) (types.Co
 		return nil, err
 	}
 
-	accessToken := config.GetString(cfg.AccessTokenField.FieldName)
+	username := config.GetString(cfg.UsernameField.FieldName)
+	password := config.GetString(cfg.PasswordField.FieldName)
 	apiUrl := config.GetString(cfg.ApiUrlField.FieldName)
-	cb, err := connector.New(ctx, apiUrl, accessToken)
+	cb, err := connector.New(ctx, apiUrl, username, password)
 	if err != nil {
 		l.Error("error creating connector", zap.Error(err))
 		return nil, err

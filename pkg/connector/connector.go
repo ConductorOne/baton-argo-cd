@@ -36,6 +36,20 @@ func (d *Connector) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error)
 	return &v2.ConnectorMetadata{
 		DisplayName: "Argo CD",
 		Description: "Connector syncs data about accounts, roles, create account and role resources in Argo CD.",
+		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
+			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
+				"username": {
+					DisplayName: "Username",
+					Required:    true,
+					Description: "The username for the new Argo CD account.",
+					Field: &v2.ConnectorAccountCreationSchema_Field_StringField{
+						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
+					},
+					Placeholder: "alice",
+					Order:       1,
+				},
+			},
+		},
 	}, nil
 }
 
@@ -46,12 +60,12 @@ func (d *Connector) Validate(ctx context.Context) (annotations.Annotations, erro
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, apiUrl string, accessToken string) (*Connector, error) {
+func New(ctx context.Context, apiUrl string, username string, password string) (*Connector, error) {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // https://localhost validation.
 	}
 	httpClient := uhttp.NewBaseHttpClient(&http.Client{Transport: tr})
-	argoCDClient := client.NewClient(ctx, apiUrl, accessToken, httpClient)
+	argoCDClient := client.NewClient(ctx, apiUrl, username, password, httpClient)
 	return &Connector{
 		client: argoCDClient,
 	}, nil

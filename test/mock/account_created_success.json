@@ -1,0 +1,5 @@
+{
+  "name": "test-user-1",
+  "enabled": true,
+  "capabilities": ["apiKey", "login"]
+}
