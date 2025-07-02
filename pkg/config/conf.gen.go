@@ -4,7 +4,8 @@ package config
 import "reflect" 
 
 type ArgoCd struct {
-	AccessToken string `mapstructure:"access-token"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
 	ApiUrl string `mapstructure:"api-url"`
 }
 

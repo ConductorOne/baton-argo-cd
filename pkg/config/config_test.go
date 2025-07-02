@@ -16,14 +16,31 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid config",
 			config: &ArgoCd{
-				AccessToken: "test-token",
-				ApiUrl:      "https://test.com",
+				Username: "admin",
+				Password: "test-password",
+				ApiUrl:   "https://test.com",
 			},
 			wantErr: false,
 		},
 		{
 			name:    "invalid config - missing required fields",
 			config:  &ArgoCd{},
+			wantErr: true,
+		},
+		{
+			name: "invalid config - missing password",
+			config: &ArgoCd{
+				Username: "admin",
+				ApiUrl:   "https://test.com",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid config - missing username",
+			config: &ArgoCd{
+				Password: "test-password",
+				ApiUrl:   "https://test.com",
+			},
 			wantErr: true,
 		},
 	}

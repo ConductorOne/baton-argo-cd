@@ -1,6 +1,6 @@
 package client
 
-// Account represents an account from the ArgoCD API.
+// Account represents an account from the ArgoCD CLI.
 type Account struct {
 	Name         string         `json:"name"`
 	Enabled      bool           `json:"enabled"`
@@ -11,10 +11,6 @@ type Account struct {
 type AccountToken struct {
 	ID       string `json:"id"`
 	IssuedAt int64  `json:"issuedAt"`
-}
-
-type AccountsResponse struct {
-	Items []Account `json:"items"`
 }
 
 // Role represents a role from the ArgoCD RBAC config map.
@@ -31,4 +27,18 @@ type ConfigMap struct {
 type PolicyGrant struct {
 	Subject string
 	Role    string
+}
+
+// GroupBinding represents a user/group to role binding from ArgoCD RBAC.
+type GroupBinding struct {
+	Subject string
+	Role    string
+}
+
+// Policy represents a role-based access policy from ArgoCD RBAC.
+type Policy struct {
+	Role     string
+	Resource string
+	Action   string
+	Effect   string
 }

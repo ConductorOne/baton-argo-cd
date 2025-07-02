@@ -2,52 +2,39 @@ package client
 
 import (
 	"context"
-	"net/http"
-	"net/url"
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/conductorone/baton-sdk/pkg/annotations"
-	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
 
-const (
-	accountsEndpoint = "/api/v1/account"
-)
-
+// Client provides methods to interact with Argo CD CLI.
 type Client struct {
-	apiUrl      string
-	accessToken string
-	wrapper     *uhttp.BaseHttpClient
+	apiUrl   string
+	username string
+	password string
 }
 
-// NewClient creates a new Client instance with the provided HTTP client.
-func NewClient(ctx context.Context, apiUrl string, accessToken string, httpClient *uhttp.BaseHttpClient) *Client {
-	if httpClient == nil {
-		httpClient = &uhttp.BaseHttpClient{}
-	}
+// NewClient creates a new Client instance.
+func NewClient(ctx context.Context, apiUrl string, username string, password string) *Client {
 	return &Client{
-		wrapper:     httpClient,
-		apiUrl:      apiUrl,
-		accessToken: accessToken,
+		apiUrl:   apiUrl,
+		username: username,
+		password: password,
 	}
 }
 
-// GetAccounts fetches a paginated list of accounts from the Argo CD API.
+// GetAccounts fetches a list of real accounts from ArgoCD using the CLI.
 func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
-	accountsURL, err := buildResourceURL(c.apiUrl, accountsEndpoint)
+	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput)
 	if err != nil {
-		return nil, err
-	}
-
-	var accountsResponse AccountsResponse
-	err = c.doRequest(ctx, http.MethodGet, accountsURL, &accountsResponse)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get accounts: %w", err)
 	}
 
 	var accounts []*Account
-	for _, account := range accountsResponse.Items {
-		accounts = append(accounts, &account)
+	if err := json.Unmarshal(output, &accounts); err != nil {
+		return nil, fmt.Errorf("failed to parse accounts JSON: %w (original output: %s)", err, string(output))
 	}
 
 	return accounts, nil
@@ -70,30 +57,18 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 		roleNames[roleName] = struct{}{}
 	}
 
-	if okCsv {
-		policies := strings.Split(policyData, "\n")
-
-		for _, p := range policies {
-			parts := strings.Split(strings.TrimSpace(p), CommaSeparator)
-			if len(parts) < 2 {
-				continue
-			}
-
-			var roleDef string
-			policyType := parts[0]
-
-			switch policyType {
-			case PolicyTypeP:
-				roleDef = strings.TrimSpace(parts[1])
-			case PolicyTypeG:
-				if len(parts) > 2 {
-					roleDef = strings.TrimSpace(parts[2])
+	if okCsv && strings.TrimSpace(policyData) != "" {
+		bindings, policies, err := ParseArgoCDPolicyCSV(policyData)
+		if err == nil {
+			for _, binding := range bindings {
+				if binding.Role != "" {
+					roleNames[binding.Role] = struct{}{}
 				}
 			}
-
-			if strings.HasPrefix(roleDef, RolePrefix) {
-				roleName := strings.TrimPrefix(roleDef, RolePrefix)
-				roleNames[roleName] = struct{}{}
+			for _, policy := range policies {
+				if policy.Role != "" {
+					roleNames[policy.Role] = struct{}{}
+				}
 			}
 		}
 	}
@@ -106,47 +81,37 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 	}
 
 	var annos annotations.Annotations
-
 	return roles, annos, nil
 }
 
 // GetPolicyGrants fetches a list of grants from the ArgoCD RBAC config map.
 func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotations.Annotations, error) {
+	var annos annotations.Annotations
 	cm, err := getRBACConfigMap()
 	if err != nil {
 		return nil, nil, err
 	}
 
 	policyData, ok := cm.Data[PolicyCSVKey]
-	if !ok {
+	if !ok || strings.TrimSpace(policyData) == "" {
 		return nil, nil, nil
 	}
 
 	var grants []*PolicyGrant
-	policies := strings.Split(policyData, "\n")
 
-	for _, p := range policies {
-		if !strings.HasPrefix(p, PolicyTypeG+CommaSeparator) {
-			continue
-		}
-		parts := strings.Split(p, CommaSeparator)
-		if len(parts) != 3 {
-			continue
-		}
+	bindings, _, err := ParseArgoCDPolicyCSV(policyData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse policy CSV: %w", err)
+	}
 
-		subject := strings.TrimSpace(parts[1])
-		roleDef := strings.TrimSpace(parts[2])
-
-		if strings.HasPrefix(roleDef, RolePrefix) {
-			roleName := strings.TrimPrefix(roleDef, RolePrefix)
+	for _, binding := range bindings {
+		if binding.Subject != "" && binding.Role != "" {
 			grants = append(grants, &PolicyGrant{
-				Subject: subject,
-				Role:    roleName,
+				Subject: binding.Subject,
+				Role:    binding.Role,
 			})
 		}
 	}
-
-	var annos annotations.Annotations
 	return grants, annos, nil
 }
 
@@ -165,48 +130,5 @@ func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 	if defaultPolicy != "" {
 		return strings.TrimPrefix(defaultPolicy, RolePrefix), nil
 	}
-
 	return "", nil
-}
-
-// doRequest executes an HTTP request and decodes the response into the provided result.
-func (c *Client) doRequest(
-	ctx context.Context,
-	method string,
-	requestURL string,
-	res interface{},
-) error {
-	parsedURL, err := url.Parse(requestURL)
-	if err != nil {
-		return err
-	}
-
-	requestOptions := []uhttp.RequestOption{
-		uhttp.WithContentTypeJSONHeader(),
-		uhttp.WithAcceptJSONHeader(),
-		uhttp.WithBearerToken(c.accessToken),
-	}
-
-	req, err := c.wrapper.NewRequest(
-		ctx,
-		method,
-		parsedURL,
-		requestOptions...,
-	)
-	if err != nil {
-		return err
-	}
-
-	var doOptions []uhttp.DoOption
-	if res != nil {
-		doOptions = append(doOptions, uhttp.WithJSONResponse(res))
-	}
-
-	resp, err := c.wrapper.Do(req, doOptions...)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	return nil
 }
