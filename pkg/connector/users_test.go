@@ -22,15 +22,9 @@ func TestUserBuilder_List(t *testing.T) {
 			{Name: "user1", Enabled: true},
 			{Name: "user2", Enabled: false},
 		}
-		mockGrants := []*client.PolicyGrant{
-			{Subject: "user3", Role: "role1"},
-		}
 		mockCli := &test.MockClient{
 			GetAccountsFunc: func(ctx context.Context) ([]*client.Account, error) {
 				return mockAccounts, nil
-			},
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return mockGrants, nil, nil
 			},
 		}
 
@@ -39,7 +33,7 @@ func TestUserBuilder_List(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, nextPage)
 		assert.Nil(t, annos)
-		assert.Len(t, resources, 3)
+		assert.Len(t, resources, 2)
 		assert.Equal(t, "user1", resources[0].DisplayName)
 	})
 
@@ -61,7 +55,7 @@ func TestUserBuilder_List(t *testing.T) {
 func TestUserBuilder_Entitlements(t *testing.T) {
 	builder := newUserBuilder(nil)
 	resource := &v2.Resource{
-		Id: &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "test-user"},
+		Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "test-user"},
 	}
 
 	ents, nextPage, annos, err := builder.Entitlements(context.Background(), resource, &pagination.Token{})
@@ -75,7 +69,7 @@ func TestUserBuilder_Entitlements(t *testing.T) {
 func TestUserBuilder_Grants(t *testing.T) {
 	builder := newUserBuilder(nil)
 	resource := &v2.Resource{
-		Id: &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "test-user"},
+		Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "test-user"},
 	}
 
 	grants, nextPage, annos, err := builder.Grants(context.Background(), resource, &pagination.Token{})

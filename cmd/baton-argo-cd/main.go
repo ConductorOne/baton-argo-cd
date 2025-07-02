@@ -54,7 +54,6 @@ func getConnector[T field.Configurable](ctx context.Context, config T) (types.Co
 	apiUrl := config.GetString(cfg.ApiUrlField.FieldName)
 	cb, err := connector.New(ctx, apiUrl, username, password)
 	if err != nil {
-		l.Error("error creating connector", zap.Error(err))
 		return nil, err
 	}
 	connector, err := connectorbuilder.NewConnector(ctx, cb)

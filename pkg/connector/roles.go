@@ -8,7 +8,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/conductorone/baton-sdk/pkg/types/entitlement"
-	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
@@ -55,7 +54,7 @@ func (r *roleBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _
 	var annos annotations.Annotations
 
 	assigmentOptions := []entitlement.EntitlementOption{
-		entitlement.WithGrantableTo(accountResourceType),
+		entitlement.WithGrantableTo(userResourceType),
 		entitlement.WithDescription(fmt.Sprintf("%s to %s role", assignedEntitlement, resource.DisplayName)),
 		entitlement.WithDisplayName(fmt.Sprintf("%s role %s", resource.DisplayName, assignedEntitlement)),
 	}
@@ -73,66 +72,35 @@ func (r *roleBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _
 func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
 	roleName := roleResource.Id.Resource
 
-	// Get real ArgoCD accounts
 	accounts, err := r.client.GetAccounts(ctx)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("failed to get accounts: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to get users for role: %w", err)
 	}
 
-	// Get policy grants
 	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
 	if err != nil {
 		return nil, "", annos, fmt.Errorf("failed to get policy grants: %w", err)
 	}
 
-	// Create map of real accounts for quick lookup
-	accountsMap := make(map[string]bool)
-	for _, acc := range accounts {
-		accountsMap[acc.Name] = true
+	accountsMap := prepareAccountLookup(accounts)
+
+	explicitGrants, usersWithRole, err := handleExplicitGrants(roleResource, policyGrants, accountsMap, roleName)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to handle explicit grants: %w", err)
 	}
 
-	var grants []*v2.Grant
-	usersWithRole := make(map[string]bool) // Track users already granted to avoid duplicates
+	allGrants := explicitGrants
 
-	// Check explicit role grants - only for real ArgoCD users
-	for _, pg := range policyGrants {
-		if pg.Role == roleName && accountsMap[pg.Subject] {
-			if !usersWithRole[pg.Subject] {
-				userResource, err := resource.NewUserResource(pg.Subject, accountResourceType, pg.Subject, nil)
-				if err != nil {
-					return nil, "", annos, err
-				}
-				grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResource.Id))
-				usersWithRole[pg.Subject] = true
-			}
-		}
-	}
-
-	// Check default role - users without explicit grants get default role
 	defaultRole, err := r.client.GetDefaultRole(ctx)
 	if err == nil && defaultRole == roleName {
-		// Find users without explicit role grants
-		usersWithExplicitGrants := make(map[string]bool)
-		for _, pg := range policyGrants {
-			if accountsMap[pg.Subject] { // Only count real users
-				usersWithExplicitGrants[pg.Subject] = true
-			}
+		defaultRoleGrants, err := handleDefaultRoleGrants(roleResource, accounts, policyGrants, accountsMap, usersWithRole)
+		if err != nil {
+			return nil, "", annos, fmt.Errorf("failed to handle default role grants: %w", err)
 		}
-
-		// Grant default role to users without explicit grants
-		for _, acc := range accounts {
-			if !usersWithExplicitGrants[acc.Name] && !usersWithRole[acc.Name] {
-				userResource, err := resource.NewUserResource(acc.Name, accountResourceType, acc.Name, nil)
-				if err != nil {
-					return nil, "", annos, err
-				}
-				grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResource.Id))
-				usersWithRole[acc.Name] = true
-			}
-		}
+		allGrants = append(allGrants, defaultRoleGrants...)
 	}
 
-	return grants, "", annos, nil
+	return allGrants, "", annos, nil
 }
 
 // newRoleBuilder creates a new roleBuilder.

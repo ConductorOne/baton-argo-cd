@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
-	"go.uber.org/zap"
-
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
@@ -22,33 +19,25 @@ type userBuilder struct {
 
 // ResourceType returns the resource type for users.
 func (u *userBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
-	return accountResourceType
+	return userResourceType
 }
 
 // List returns all users from Argo CD as resource objects.
-// This includes only real user accounts from ArgoCD, not external subjects from policy grants.
+// This includes both real user accounts from ArgoCD and external subjects from policy grants.
 func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
-	l := ctxzap.Extract(ctx)
-
 	accounts, err := u.client.GetAccounts(ctx)
 	if err != nil {
-		l.Error("Failed to fetch user accounts from Argo CD", zap.Error(err))
-		return nil, "", nil, fmt.Errorf("failed to fetch user accounts: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to fetch user data: %w", err)
 	}
 
 	var resources []*v2.Resource
 	for _, account := range accounts {
 		accountResource, err := parseAccountResource(account)
 		if err != nil {
-			l.Error("Failed to parse account resource",
-				zap.String("account_name", account.Name),
-				zap.Error(err))
 			return nil, "", nil, fmt.Errorf("failed to parse account %s: %w", account.Name, err)
 		}
 		resources = append(resources, accountResource)
 	}
-
-	l.Debug("Listed ArgoCD accounts", zap.Int("count", len(resources)))
 	return resources, "", nil, nil
 }
 
@@ -142,7 +131,7 @@ func (u *userBuilder) extractUsername(accountInfo *v2.AccountInfo) (string, erro
 // newUserBuilder creates a new userBuilder instance.
 func newUserBuilder(client ArgoCdClient) *userBuilder {
 	return &userBuilder{
-		resourceType: accountResourceType,
+		resourceType: userResourceType,
 		client:       client,
 	}
 }

@@ -9,11 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
-	"go.uber.org/zap"
-	"golang.org/x/crypto/bcrypt"
-
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -31,7 +28,7 @@ type Client struct {
 }
 
 // NewClient creates a new Client instance.
-func NewClient(ctx context.Context, apiUrl string, username string, password string, httpClient interface{}) *Client {
+func NewClient(ctx context.Context, apiUrl string, username string, password string) *Client {
 	return &Client{
 		apiUrl:   apiUrl,
 		username: username,
@@ -39,29 +36,16 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 	}
 }
 
-
-
 // GetAccounts fetches a list of real accounts from ArgoCD using the CLI.
 func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
-	l := ctxzap.Extract(ctx)
-
-	output, err := c.runArgoCDCommandWithOutput(ctx, "account", "list", "--output", "json")
+	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get accounts: %w", err)
 	}
 
 	var accounts []*Account
 	if err := json.Unmarshal(output, &accounts); err != nil {
-		l.Debug("Direct account parsing failed, trying alternative parsing", zap.String("output", string(output)))
-
-		var accountsResponse AccountsResponse
-		if err2 := json.Unmarshal(output, &accountsResponse); err2 == nil {
-			for _, account := range accountsResponse.Items {
-				accounts = append(accounts, &account)
-			}
-		} else {
-			return nil, fmt.Errorf("failed to parse accounts JSON: %w (original output: %s)", err, string(output))
-		}
+		return nil, fmt.Errorf("failed to parse accounts JSON: %w (original output: %s)", err, string(output))
 	}
 
 	return accounts, nil
@@ -113,6 +97,7 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 
 // GetPolicyGrants fetches a list of grants from the ArgoCD RBAC config map.
 func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotations.Annotations, error) {
+	var annos annotations.Annotations
 	cm, err := getRBACConfigMap()
 	if err != nil {
 		return nil, nil, err
@@ -125,13 +110,11 @@ func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotatio
 
 	var grants []*PolicyGrant
 
-	// Use the improved CSV parsing function
 	bindings, _, err := ParseArgoCDPolicyCSV(policyData)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse policy CSV: %w", err)
 	}
 
-	// Convert group bindings to policy grants
 	for _, binding := range bindings {
 		if binding.Subject != "" && binding.Role != "" {
 			grants = append(grants, &PolicyGrant{
@@ -140,8 +123,6 @@ func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotatio
 			})
 		}
 	}
-
-	var annos annotations.Annotations
 	return grants, annos, nil
 }
 
@@ -160,7 +141,6 @@ func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 	if defaultPolicy != "" {
 		return strings.TrimPrefix(defaultPolicy, RolePrefix), nil
 	}
-
 	return "", nil
 }
 

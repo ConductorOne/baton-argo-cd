@@ -30,21 +30,19 @@ const (
 	ArgocdNamespace   = "argocd"
 	OutputFlag        = "-o"
 	JSONOutput        = "json"
+
+	// ArgoCD CLI command constants.
+	AccountCommand     = "account"
+	ListCommand        = "list"
+	OutputFlagLong     = "--output"
+	GetUserInfoCommand = "get-user-info"
+	LoginCommand       = "login"
+	LogoutCommand      = "logout"
+	UsernameFlag       = "--username"
+	PasswordFlag       = "--password"
+	InsecureFlag       = "--insecure"
+	ArgoCDCommand      = "argocd"
 )
-
-// GroupBinding represents a user/group to role binding from ArgoCD RBAC.
-type GroupBinding struct {
-	Subject string // user or group
-	Role    string
-}
-
-// Policy represents a role-based access policy from ArgoCD RBAC.
-type Policy struct {
-	Role     string
-	Resource string
-	Action   string
-	Effect   string
-}
 
 // ParseArgoCDPolicyCSV parses ArgoCD policy CSV data into group bindings and policies.
 func ParseArgoCDPolicyCSV(data string) ([]GroupBinding, []Policy, error) {
@@ -163,25 +161,25 @@ func (c *Client) cleanURLForCLI() string {
 func (c *Client) ensureLoggedIn(ctx context.Context) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := c.runArgoCDCommandDirect(ctx, "account", "get-user-info"); err == nil {
+	if err := c.runArgoCDCommandDirect(ctx, AccountCommand, GetUserInfoCommand); err == nil {
 		l.Debug("ArgoCD CLI already authenticated")
 		return nil
 	} else {
 		l.Debug("ArgoCD CLI not authenticated or session expired", zap.Error(err))
 	}
 
-	_ = c.runArgoCDCommandDirect(ctx, "logout")
+	_ = c.runArgoCDCommandDirect(ctx, LogoutCommand)
 
 	cleanURL := c.cleanURLForCLI()
 
-	if err := c.runArgoCDCommandDirect(ctx, "login", cleanURL,
-		"--username", c.username,
-		"--password", c.password,
-		"--insecure"); err != nil {
+	if err := c.runArgoCDCommandDirect(ctx, LoginCommand, cleanURL,
+		UsernameFlag, c.username,
+		PasswordFlag, c.password,
+		InsecureFlag); err != nil {
 		return fmt.Errorf("argocd login failed: %w", err)
 	}
 
-	if err := c.runArgoCDCommandDirect(ctx, "account", "get-user-info"); err != nil {
+	if err := c.runArgoCDCommandDirect(ctx, AccountCommand, GetUserInfoCommand); err != nil {
 		return fmt.Errorf("login verification failed: %w", err)
 	}
 
@@ -190,7 +188,7 @@ func (c *Client) ensureLoggedIn(ctx context.Context) error {
 
 // runArgoCDCommandDirect executes an ArgoCD CLI command without ensuring login first.
 func (c *Client) runArgoCDCommandDirect(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, argoCDCommand, args...)
+	cmd := exec.CommandContext(ctx, ArgoCDCommand, args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -208,7 +206,7 @@ func (c *Client) runArgoCDCommandWithOutput(ctx context.Context, args ...string)
 		return nil, fmt.Errorf("failed to ensure login: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, argoCDCommand, args...)
+	cmd := exec.CommandContext(ctx, ArgoCDCommand, args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

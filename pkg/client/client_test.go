@@ -10,7 +10,7 @@ import (
 func TestNewClient(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		ctx := context.Background()
-		client := NewClient(ctx, "https://test.com", "admin", "password", nil)
+		client := NewClient(ctx, "https://test.com", "admin", "password")
 
 		assert.NotNil(t, client)
 		assert.Equal(t, "https://test.com", client.apiUrl)
@@ -19,20 +19,13 @@ func TestNewClient(t *testing.T) {
 	})
 }
 
-// Note: Tests for GetAccounts, GetRoles, etc. are skipped as they require
-// the ArgoCD CLI to be installed and accessible.
-// These integration tests should be run in an environment where ArgoCD CLI is available.
-
-/*
+// TestGetAccounts_Integration is an integration test that requires ArgoCD CLI to be installed and configured.
 func TestGetAccounts_Integration(t *testing.T) {
-	// This test requires ArgoCD CLI to be installed and configured
 	t.Skip("Integration test - requires ArgoCD CLI")
-
 	ctx := context.Background()
-	client := NewClient(ctx, "127.0.0.1:8080", "admin", "password", nil)
+	client := NewClient(ctx, "127.0.0.1:8080", "admin", "password")
 
 	accounts, err := client.GetAccounts(ctx)
 	assert.NoError(t, err)
 	assert.NotNil(t, accounts)
 }
-*/
