@@ -20,6 +20,7 @@ type MockClient struct {
 	GetPolicyGrantsFunc func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
 	GetDefaultRoleFunc  func(ctx context.Context) (string, error)
 	CreateAccountFunc   func(ctx context.Context, username, email, password string) (*client.Account, annotations.Annotations, error)
+	UpdateUserRoleFunc  func(ctx context.Context, userID, roleID string) (annotations.Annotations, error)
 }
 
 // GetAccounts calls the mock method if it is defined.
@@ -60,6 +61,14 @@ func (m *MockClient) GetDefaultRole(ctx context.Context) (string, error) {
 		return m.GetDefaultRoleFunc(ctx)
 	}
 	return "", nil
+}
+
+// UpdateUserRole calls the mock method if it is defined.
+func (m *MockClient) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+	if m.UpdateUserRoleFunc != nil {
+		return m.UpdateUserRoleFunc(ctx, userID, roleID)
+	}
+	return nil, nil
 }
 
 // ReadFile loads content from a JSON file from /test/mock/.

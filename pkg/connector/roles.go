@@ -8,6 +8,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/conductorone/baton-sdk/pkg/types/entitlement"
+	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
@@ -101,6 +102,91 @@ func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *
 	}
 
 	return allGrants, "", annos, nil
+}
+
+// Grant assigns a role to a user. It replaces any existing roles.
+func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) ([]*v2.Grant, annotations.Annotations, error) {
+	userID := principal.Id.Resource
+	roleID := entitlement.Resource.Id.Resource
+
+	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
+	if err != nil {
+		return nil, annos, fmt.Errorf("failed to get policy grants: %w", err)
+	}
+
+	var userRoles []string
+	for _, p := range policyGrants {
+		if p.Subject == userID {
+			userRoles = append(userRoles, p.Role)
+		}
+	}
+
+	hasRole := false
+	for _, role := range userRoles {
+		if role == roleID {
+			hasRole = true
+			break
+		}
+	}
+	if hasRole && len(userRoles) == 1 {
+		return nil, annotations.New(&v2.GrantAlreadyExists{}), nil
+	}
+
+	annos, err = r.client.UpdateUserRole(ctx, userID, roleID)
+	if err != nil {
+		return nil, annos, fmt.Errorf("failed to update user role: %w", err)
+	}
+
+	grantObj := grant.NewGrant(
+		entitlement.Resource,
+		assignedEntitlement,
+		principal.Id,
+	)
+
+	return []*v2.Grant{grantObj}, annos, nil
+}
+
+// Revoke removes a role from a user and assigns the default role.
+func (r *roleBuilder) Revoke(ctx context.Context, g *v2.Grant) (annotations.Annotations, error) {
+	userID := g.Principal.Id.Resource
+	roleID := g.Entitlement.Resource.Id.Resource
+
+	defaultRole, err := r.client.GetDefaultRole(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default role: %w", err)
+	}
+
+	if roleID == defaultRole {
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+	}
+
+	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
+	if err != nil {
+		return annos, fmt.Errorf("failed to get policy grants: %w", err)
+	}
+
+	var userRoles []string
+	for _, p := range policyGrants {
+		if p.Subject == userID {
+			userRoles = append(userRoles, p.Role)
+		}
+	}
+
+	isAlreadyDefault := false
+	if len(userRoles) == 1 && userRoles[0] == defaultRole {
+		isAlreadyDefault = true
+	}
+
+	if isAlreadyDefault {
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+	}
+
+	annos, err = r.client.UpdateUserRole(ctx, userID, defaultRole)
+	if err != nil {
+		return annos, fmt.Errorf("failed to set default role: %w", err)
+	}
+
+	return annos, nil
 }
 
 // newRoleBuilder creates a new roleBuilder.

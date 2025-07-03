@@ -42,6 +42,7 @@ const (
 	PasswordFlag       = "--password"
 	InsecureFlag       = "--insecure"
 	ArgoCDCommand      = "argocd"
+	GRPCWebFlag        = "--grpc-web"
 )
 
 // ParseArgoCDPolicyCSV parses ArgoCD policy CSV data into group bindings and policies.
@@ -161,7 +162,7 @@ func (c *Client) cleanURLForCLI() string {
 func (c *Client) ensureLoggedIn(ctx context.Context) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := c.runArgoCDCommandDirect(ctx, AccountCommand, GetUserInfoCommand); err == nil {
+	if err := c.runArgoCDCommandDirect(ctx, AccountCommand, GetUserInfoCommand, GRPCWebFlag); err == nil {
 		l.Debug("ArgoCD CLI already authenticated")
 		return nil
 	} else {
@@ -175,11 +176,13 @@ func (c *Client) ensureLoggedIn(ctx context.Context) error {
 	if err := c.runArgoCDCommandDirect(ctx, LoginCommand, cleanURL,
 		UsernameFlag, c.username,
 		PasswordFlag, c.password,
-		InsecureFlag); err != nil {
+		InsecureFlag,
+		GRPCWebFlag,
+	); err != nil {
 		return fmt.Errorf("argocd login failed: %w", err)
 	}
 
-	if err := c.runArgoCDCommandDirect(ctx, AccountCommand, GetUserInfoCommand); err != nil {
+	if err := c.runArgoCDCommandDirect(ctx, AccountCommand, GetUserInfoCommand, GRPCWebFlag); err != nil {
 		return fmt.Errorf("login verification failed: %w", err)
 	}
 

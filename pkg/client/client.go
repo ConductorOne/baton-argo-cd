@@ -38,7 +38,7 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 
 // GetAccounts fetches a list of real accounts from ArgoCD using the CLI.
 func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
-	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput)
+	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput, GRPCWebFlag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get accounts: %w", err)
 	}
@@ -142,6 +142,58 @@ func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 		return strings.TrimPrefix(defaultPolicy, RolePrefix), nil
 	}
 	return "", nil
+}
+
+// UpdateUserRole updates the role for a user. It removes all existing roles and assigns the new one.
+func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+	cm, err := getRBACConfigMap()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
+	}
+
+	policyCsv, ok := cm.Data[PolicyCSVKey]
+	if !ok {
+		policyCsv = ""
+	}
+
+	lines := strings.Split(policyCsv, "\n")
+	var newLines []string
+
+	userGrantPrefix := fmt.Sprintf("g, %s, ", userID)
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
+			continue
+		}
+		if !strings.HasPrefix(trimmedLine, userGrantPrefix) {
+			newLines = append(newLines, trimmedLine)
+		}
+	}
+
+	newLines = append(newLines, fmt.Sprintf("g, %s, %s", userID, roleID))
+
+	updatedPolicyCsv := strings.Join(newLines, "\n")
+
+	// JSON escape the string for the patch
+	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal policy csv for patch: %w", err)
+	}
+
+	var patch string
+	if ok {
+		// If the key exists, replace it
+		patch = fmt.Sprintf(`[{"op": "replace", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
+	} else {
+		// If the key doesn't exist, add it
+		patch = fmt.Sprintf(`[{"op": "add", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
+	}
+
+	if err := c.kubectlPatch("configmap", RBACConfigMapName, patch); err != nil {
+		return nil, fmt.Errorf("failed to patch rbac configmap: %w", err)
+	}
+
+	return nil, nil
 }
 
 // CreateAccount creates a new local user in ArgoCD with the provided username and password.
