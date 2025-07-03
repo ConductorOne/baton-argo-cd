@@ -1,17 +1,16 @@
 package connector
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
-	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
-// parseAccountResource creates a resource for an account.
+// parseAccountResource creates a resource for an account with comprehensive user traits including emails.
 func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	tokensStr := ""
 	if len(account.Tokens) > 0 {
@@ -24,7 +23,7 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	profile := map[string]interface{}{
 		"name":         account.Name,
 		"enabled":      account.Enabled,
-		"capabilities": strings.Join(account.Capabilities, client.CommaSeparator),
+		"capabilities": strings.Join(account.Capabilities, ","),
 		"tokens":       tokensStr,
 	}
 
@@ -40,80 +39,60 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	)
 }
 
-// getAccountsMap fetches all accounts from ArgoCD and returns them as a map.
-func getAccountsMap(ctx context.Context, c ArgoCdClient) (map[string]*client.Account, error) {
-	accountsMap := make(map[string]*client.Account)
-	accounts, err := c.GetAccounts(ctx)
-	if err != nil {
-		return nil, err
+// prepareAccountLookup creates a map for quick lookup of local account names.
+func prepareAccountLookup(accounts []*client.Account) map[string]bool {
+	lookup := make(map[string]bool)
+	for _, acc := range accounts {
+		lookup[acc.Name] = true
 	}
-	for _, account := range accounts {
-		accCopy := account
-		accountsMap[accCopy.Name] = accCopy
-	}
-	return accountsMap, nil
+	return lookup
 }
 
-// getAllUserData fetches all accounts and policy grants from ArgoCD.
-func getAllUserData(ctx context.Context, c ArgoCdClient) (map[string]*client.Account, []*client.PolicyGrant, annotations.Annotations, error) {
-	accountsMap, err := getAccountsMap(ctx, c)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+// handleExplicitGrants processes policy grants for a specific role.
+func handleExplicitGrants(
+	roleResource *v2.Resource,
+	subjects []string,
+	accountsMap map[string]bool,
+) ([]*v2.Grant, error) {
+	var grants []*v2.Grant
 
-	policyGrants, annos, err := c.GetPolicyGrants(ctx)
-	if err != nil {
-		return nil, nil, annos, err
-	}
-
-	return accountsMap, policyGrants, annos, nil
-}
-
-// getUsersForRole returns a list of usernames that have the given role.
-func getUsersForRole(ctx context.Context, c ArgoCdClient, roleName string) ([]string, annotations.Annotations, error) {
-	accountsMap, policyGrants, annos, err := getAllUserData(ctx, c)
-	if err != nil {
-		return nil, annos, err
-	}
-
-	userToRoles := make(map[string][]string)
-	for _, pg := range policyGrants {
-		userToRoles[pg.Subject] = append(userToRoles[pg.Subject], pg.Role)
-	}
-
-	allUserNames := make(map[string]struct{})
-	for name := range accountsMap {
-		allUserNames[name] = struct{}{}
-	}
-	for subject := range userToRoles {
-		allUserNames[subject] = struct{}{}
-	}
-
-	defaultRole, err := c.GetDefaultRole(ctx)
-	if err != nil {
-		return nil, annos, err
-	}
-
-	var usersWithRole []string
-	for userName := range allUserNames {
-		assignedRoles, hasExplicitRoles := userToRoles[userName]
-
-		isGranted := false
-		if hasExplicitRoles {
-			for _, userRole := range assignedRoles {
-				if userRole == roleName {
-					isGranted = true
-					break
-				}
+	for _, subject := range subjects {
+		if accountsMap[subject] {
+			userResourceID := &v2.ResourceId{
+				ResourceType: userResourceType.Id,
+				Resource:     subject,
 			}
-		} else if defaultRole != "" && roleName == defaultRole {
-			isGranted = true
-		}
-
-		if isGranted {
-			usersWithRole = append(usersWithRole, userName)
+			grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResourceID))
 		}
 	}
 
-	return usersWithRole, annos, nil
+	return grants, nil
+}
+
+// handleDefaultRoleGrants assigns the default role to any user without an explicit grant.
+func handleDefaultRoleGrants(
+	roleResource *v2.Resource,
+	accountsMap map[string]bool,
+	policyGrants []*client.PolicyGrant,
+) ([]*v2.Grant, error) {
+	var grants []*v2.Grant
+	usersWithAnyExplicitGrant := make(map[string]bool)
+
+	for _, pg := range policyGrants {
+		if accountsMap[pg.Subject] {
+			usersWithAnyExplicitGrant[pg.Subject] = true
+		}
+	}
+
+	for accountName := range accountsMap {
+		if _, hasGrant := usersWithAnyExplicitGrant[accountName]; !hasGrant {
+			userResourceID := &v2.ResourceId{
+				ResourceType: userResourceType.Id,
+				Resource:     accountName,
+			}
+			grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResourceID))
+		}
+	}
+
+	return grants, nil
 }

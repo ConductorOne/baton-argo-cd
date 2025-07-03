@@ -86,6 +86,12 @@ func TestRoleBuilder_Grants(t *testing.T) {
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
 				return "", nil
 			},
+			GetSubjectsForRoleFunc: func(ctx context.Context, roleName string) ([]string, error) {
+				if roleName == "role1" {
+					return []string{"user1"}, nil
+				}
+				return nil, nil
+			},
 		}
 
 		builder := newRoleBuilder(mockCli)
@@ -108,6 +114,9 @@ func TestRoleBuilder_Grants(t *testing.T) {
 			},
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
 				return "default-role", nil
+			},
+			GetSubjectsForRoleFunc: func(ctx context.Context, roleName string) ([]string, error) {
+				return nil, nil
 			},
 		}
 

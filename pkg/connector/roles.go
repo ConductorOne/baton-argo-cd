@@ -8,7 +8,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/conductorone/baton-sdk/pkg/types/entitlement"
-	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
@@ -71,21 +70,42 @@ func (r *roleBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _
 
 // Grants returns the grants for a role.
 func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
-	users, annos, err := getUsersForRole(ctx, r.client, roleResource.Id.Resource)
+	roleName := roleResource.Id.Resource
+
+	accounts, err := r.client.GetAccounts(ctx)
 	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to get users for role: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to get users for role: %w", err)
 	}
 
-	var grants []*v2.Grant
-	for _, user := range users {
-		userResource, err := resource.NewUserResource(user, userResourceType, user, nil)
+	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to get policy grants: %w", err)
+	}
+
+	accountsMap := prepareAccountLookup(accounts)
+
+	subjects, err := r.client.GetSubjectsForRole(ctx, roleName)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to get subjects for role %s: %w", roleName, err)
+	}
+
+	explicitGrants, err := handleExplicitGrants(roleResource, subjects, accountsMap)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to handle explicit grants: %w", err)
+	}
+
+	allGrants := explicitGrants
+
+	defaultRole, err := r.client.GetDefaultRole(ctx)
+	if err == nil && defaultRole == roleName {
+		defaultRoleGrants, err := handleDefaultRoleGrants(roleResource, accountsMap, policyGrants)
 		if err != nil {
-			return nil, "", annos, err
+			return nil, "", annos, fmt.Errorf("failed to handle default role grants: %w", err)
 		}
-		grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResource.Id))
+		allGrants = append(allGrants, defaultRoleGrants...)
 	}
 
-	return grants, "", annos, nil
+	return allGrants, "", annos, nil
 }
 
 // newRoleBuilder creates a new roleBuilder.

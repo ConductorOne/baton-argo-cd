@@ -15,10 +15,11 @@ import (
 
 // MockClient is a mock implementation of the ArgoCD client for testing.
 type MockClient struct {
-	GetAccountsFunc     func(ctx context.Context) ([]*client.Account, error)
-	GetRolesFunc        func(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
-	GetPolicyGrantsFunc func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
-	GetDefaultRoleFunc  func(ctx context.Context) (string, error)
+	GetAccountsFunc        func(ctx context.Context) ([]*client.Account, error)
+	GetRolesFunc           func(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
+	GetPolicyGrantsFunc    func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
+	GetDefaultRoleFunc     func(ctx context.Context) (string, error)
+	GetSubjectsForRoleFunc func(ctx context.Context, roleName string) ([]string, error)
 }
 
 // GetAccounts calls the mock method if it is defined.
@@ -51,6 +52,14 @@ func (m *MockClient) GetDefaultRole(ctx context.Context) (string, error) {
 		return m.GetDefaultRoleFunc(ctx)
 	}
 	return "", nil
+}
+
+// GetSubjectsForRole calls the mock method if it is defined.
+func (m *MockClient) GetSubjectsForRole(ctx context.Context, roleName string) ([]string, error) {
+	if m.GetSubjectsForRoleFunc != nil {
+		return m.GetSubjectsForRoleFunc(ctx, roleName)
+	}
+	return nil, nil
 }
 
 // ReadFile loads content from a JSON file from /test/mock/.

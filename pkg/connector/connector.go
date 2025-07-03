@@ -2,26 +2,23 @@ package connector
 
 import (
 	"context"
-	"crypto/tls"
 	"io"
-	"net/http"
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
-	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
 
 type Connector struct {
-	client *client.Client
+	client ArgoCdClient
 }
 
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
-func (d *Connector) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
+func (a *Connector) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
 	return []connectorbuilder.ResourceSyncer{
-		newUserBuilder(d.client),
-		newRoleBuilder(d.client),
+		newUserBuilder(a.client),
+		newRoleBuilder(a.client),
 	}
 }
 
@@ -35,7 +32,7 @@ func (d *Connector) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.R
 func (d *Connector) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
 		DisplayName: "Argo CD",
-		Description: "Connector syncs data about accounts, roles, create account and role resources in Argo CD.",
+		Description: "Connector syncs data about users and roles resources in Argo CD.",
 	}, nil
 }
 
@@ -46,13 +43,10 @@ func (d *Connector) Validate(ctx context.Context) (annotations.Annotations, erro
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, apiUrl string, accessToken string) (*Connector, error) {
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // https://localhost validation.
-	}
-	httpClient := uhttp.NewBaseHttpClient(&http.Client{Transport: tr})
-	argoCDClient := client.NewClient(ctx, apiUrl, accessToken, httpClient)
+func New(ctx context.Context, apiUrl string, username string, password string) (*Connector, error) {
+	cli := client.NewClient(ctx, apiUrl, username, password)
+
 	return &Connector{
-		client: argoCDClient,
+		client: cli,
 	}, nil
 }

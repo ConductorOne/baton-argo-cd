@@ -27,7 +27,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     env:
       URL: ${{ secrets.URL }}
-      ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+      USERNAME: ${{ secrets.USERNAME }}
+      PASSWORD: ${{ secrets.PASSWORD }}
     steps:
       - name: Install Go
         uses: actions/setup-go@v5
@@ -65,6 +66,11 @@ jobs:
           kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.11.2/manifests/install.yaml
           kubectl wait --for=condition=ready pod --all -n argocd --timeout=5m
 
+      - name: Install ArgoCD CLI
+        run: |
+          sudo curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/v2.11.2/argocd-linux-amd64
+          sudo chmod +x /usr/local/bin/argocd
+
       - name: Configure ArgoCD
         run: |
           kubectl patch configmap argocd-cm -n argocd \
@@ -81,9 +87,6 @@ jobs:
       - name: Test Connector
         run: |
           set -ex
-
-          curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/v2.11.2/argocd-linux-amd64
-          chmod +x /usr/local/bin/argocd
 
           echo "Starting port-forward..."
           kubectl port-forward svc/argocd-server -n argocd 8080:80 >/dev/null 2>&1 &
@@ -103,18 +106,15 @@ jobs:
               exit 1
           fi
 
-          ARGO_CD_CONFIG="/tmp/argo-config"
           ARGO_CD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
-          argocd login 127.0.0.1:8080 --username admin --password "$ARGO_CD_PASSWORD" --insecure --config "${ARGO_CD_CONFIG}"
-
-          ARGO_CD_TOKEN=$(argocd account generate-token --insecure --server 127.0.0.1:8080 --config "${ARGO_CD_CONFIG}")
-          echo "::add-mask::$ARGO_CD_TOKEN"
+          echo "::add-mask::$ARGO_CD_PASSWORD"
 
           go build -o baton-argo-cd ./cmd/baton-argo-cd
 
           ./baton-argo-cd \
             --api-url "http://127.0.0.1:8080" \
-            --access-token "$ARGO_CD_TOKEN" \
+            --username "admin" \
+            --password "$ARGO_CD_PASSWORD" \
             --log-level debug \
             --file sync.c1z
 
