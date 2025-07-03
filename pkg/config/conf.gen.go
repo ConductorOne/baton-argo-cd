@@ -4,7 +4,9 @@ package config
 import "reflect" 
 
 type ArgoCd struct {
-	Configfield string `mapstructure:"configField"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	ApiUrl string `mapstructure:"api-url"`
 }
 
 func (c* ArgoCd) findFieldByTag(tagValue string) (any, bool) {

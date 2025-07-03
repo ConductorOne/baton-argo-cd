@@ -14,16 +14,32 @@ func TestValidateConfig(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:   "valid config",
+			name: "valid config",
 			config: &ArgoCd{
-				// TODO: Add minimal valid configuration here once Config type is generated
+				Username: "admin",
+				Password: "test-password",
+				ApiUrl:   "https://test.com",
 			},
 			wantErr: false,
 		},
 		{
-			name:   "invalid config - missing required fields",
+			name:    "invalid config - missing required fields",
+			config:  &ArgoCd{},
+			wantErr: true,
+		},
+		{
+			name: "invalid config - missing password",
 			config: &ArgoCd{
-				// TODO: Add configuration with missing required fields once Config type is generated
+				Username: "admin",
+				ApiUrl:   "https://test.com",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid config - missing username",
+			config: &ArgoCd{
+				Password: "test-password",
+				ApiUrl:   "https://test.com",
 			},
 			wantErr: true,
 		},
