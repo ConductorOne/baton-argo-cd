@@ -14,5 +14,6 @@ type ArgoCdClient interface {
 	GetRoles(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
 	GetPolicyGrants(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
 	GetDefaultRole(ctx context.Context) (string, error)
+	CreateAccount(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error)
 	GetSubjectsForRole(ctx context.Context, roleName string) ([]string, error)
 }
