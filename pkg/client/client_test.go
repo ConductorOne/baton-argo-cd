@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// TestNewClient tests the NewClient function.
 func TestNewClient(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		ctx := context.Background()
@@ -19,7 +20,7 @@ func TestNewClient(t *testing.T) {
 	})
 }
 
-// TestGetAccounts_Integration is an integration test that requires ArgoCD CLI to be installed and configured.
+// TestGetAccounts_Integration tests the GetAccounts function.
 func TestGetAccounts_Integration(t *testing.T) {
 	t.Skip("Integration test - requires ArgoCD CLI")
 	ctx := context.Background()
