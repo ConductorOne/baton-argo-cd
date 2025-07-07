@@ -2,15 +2,19 @@ package connector
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/crypto"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
-// parseAccountResource creates a resource for an account with comprehensive user traits including emails.
+const PasswordMinLength = 12
+
+// parseAccountResource creates a resource for an account with comprehensive user traits.
 func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	tokensStr := ""
 	if len(account.Tokens) > 0 {
@@ -58,15 +62,42 @@ func handleExplicitGrants(
 
 	for _, subject := range subjects {
 		if accountsMap[subject] {
-			userResourceID := &v2.ResourceId{
-				ResourceType: userResourceType.Id,
-				Resource:     subject,
-			}
-			grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResourceID))
+			grants = append(grants, createGrant(roleResource, subject))
 		}
 	}
 
 	return grants, nil
+}
+
+// createGrant is a helper function to create a grant.
+func createGrant(roleResource *v2.Resource, principalId string) *v2.Grant {
+	userResourceID := &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     principalId,
+	}
+	return grant.NewGrant(roleResource, assignedEntitlement, userResourceID)
+}
+
+// generateCredentials generates a random password based on the credential options.
+func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error) {
+	if credentialOptions == nil || credentialOptions.GetRandomPassword() == nil {
+		return "", errors.New("unsupported credential option: only random password is supported")
+	}
+
+	length := credentialOptions.GetRandomPassword().GetLength()
+	if length < PasswordMinLength {
+		length = PasswordMinLength
+	}
+
+	password, err := crypto.GenerateRandomPassword(
+		&v2.CredentialOptions_RandomPassword{
+			Length: length,
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	return password, nil
 }
 
 // handleDefaultRoleGrants assigns the default role to any user without an explicit grant.
@@ -86,11 +117,7 @@ func handleDefaultRoleGrants(
 
 	for accountName := range accountsMap {
 		if _, hasGrant := usersWithAnyExplicitGrant[accountName]; !hasGrant {
-			userResourceID := &v2.ResourceId{
-				ResourceType: userResourceType.Id,
-				Resource:     accountName,
-			}
-			grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResourceID))
+			grants = append(grants, createGrant(roleResource, accountName))
 		}
 	}
 
