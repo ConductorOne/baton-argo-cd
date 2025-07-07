@@ -10,12 +10,12 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 )
 
-type ArgoCd struct {
+type Connector struct {
 	client ArgoCdClient
 }
 
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
-func (a *ArgoCd) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
+func (a *Connector) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
 	return []connectorbuilder.ResourceSyncer{
 		newUserBuilder(a.client),
 		newRoleBuilder(a.client),
@@ -24,12 +24,12 @@ func (a *ArgoCd) ResourceSyncers(ctx context.Context) []connectorbuilder.Resourc
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
 // It streams a response, always starting with a metadata object, following by chunked payloads for the asset.
-func (d *ArgoCd) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.ReadCloser, error) {
+func (d *Connector) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.ReadCloser, error) {
 	return "", nil, nil
 }
 
 // Metadata returns metadata about the connector.
-func (d *ArgoCd) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
+func (d *Connector) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
 		DisplayName: "Argo CD",
 		Description: "Connector syncs data about accounts, roles, create account and role resources in Argo CD.",
@@ -52,15 +52,15 @@ func (d *ArgoCd) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
 
 // Validate is called to ensure that the connector is properly configured. It should exercise any API credentials
 // to be sure that they are valid.
-func (d *ArgoCd) Validate(ctx context.Context) (annotations.Annotations, error) {
+func (d *Connector) Validate(ctx context.Context) (annotations.Annotations, error) {
 	return nil, nil
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, apiUrl string, username string, password string) (*ArgoCd, error) {
+func New(ctx context.Context, apiUrl string, username string, password string) (*Connector, error) {
 	cli := client.NewClient(ctx, apiUrl, username, password)
 
-	return &ArgoCd{
+	return &Connector{
 		client: cli,
 	}, nil
 }

@@ -37,4 +37,6 @@ var Config = field.NewConfiguration(
 	ConfigurationFields,
 	field.WithConstraints(FieldRelationships...),
 	field.WithConnectorDisplayName("Argo Cd"),
+	field.WithHelpUrl("https://docs.baton.build/integrations/argo-cd/"),
+	field.WithIconUrl("/img/argo-cd.svg"),
 )

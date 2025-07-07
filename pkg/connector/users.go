@@ -23,7 +23,6 @@ func (u *userBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 }
 
 // List returns all users from Argo CD as resource objects.
-// This includes both real user accounts from ArgoCD and external subjects from policy grants.
 func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
 	accounts, err := u.client.GetAccounts(ctx)
 	if err != nil {
@@ -72,16 +71,9 @@ func (u *userBuilder) CreateAccount(
 	annotations.Annotations,
 	error,
 ) {
-	profile := accountInfo.GetProfile().AsMap()
-
 	username, err := u.extractUsername(accountInfo)
 	if err != nil {
 		return nil, nil, nil, err
-	}
-
-	email := ""
-	if emailValue, ok := profile["email"].(string); ok {
-		email = strings.TrimSpace(emailValue)
 	}
 
 	password, err := generateCredentials(credentialOptions)
@@ -89,7 +81,7 @@ func (u *userBuilder) CreateAccount(
 		return nil, nil, nil, fmt.Errorf("failed to generate password: %w", err)
 	}
 
-	newUser, annos, err := u.client.CreateAccount(ctx, username, email, password)
+	newUser, annos, err := u.client.CreateAccount(ctx, username, password)
 	if err != nil {
 		return nil, nil, annos, fmt.Errorf("failed to create user: %w", err)
 	}
@@ -109,7 +101,9 @@ func (u *userBuilder) CreateAccount(
 	}, []*v2.PlaintextData{passwordResult}, annos, nil
 }
 
-// extractUsername extracts the username from AccountInfo with proper fallback logic.
+// extractUsername safely retrieves the username from the AccountInfo protobuf message.
+// It prioritizes the `login` field and falls back to profile information,
+// ensuring that a valid, non-empty username is returned.
 func (u *userBuilder) extractUsername(accountInfo *v2.AccountInfo) (string, error) {
 	if login := accountInfo.GetLogin(); login != "" {
 		return strings.TrimSpace(login), nil

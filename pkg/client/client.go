@@ -20,7 +20,9 @@ const (
 	defaultAccountCapabilities = "apiKey, login"
 )
 
-// Client provides methods to interact with Argo CD CLI.
+// Client provides methods to interact with Argo CD, primarily through its command-line interface (CLI)
+// and by directly manipulating its underlying Kubernetes resources (ConfigMaps and Secrets).
+// This approach is taken to manage RBAC and user accounts.
 type Client struct {
 	apiUrl   string
 	username string
@@ -28,6 +30,7 @@ type Client struct {
 }
 
 // NewClient creates a new Client instance.
+// The credentials are used for authenticating with the Argo CD CLI.
 func NewClient(ctx context.Context, apiUrl string, username string, password string) *Client {
 	return &Client{
 		apiUrl:   apiUrl,
@@ -36,9 +39,9 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 	}
 }
 
-// GetAccounts fetches a list of real accounts from ArgoCD using the CLI.
+// GetAccounts fetches a list of all user accounts from ArgoCD by calling `argocd account list`.
 func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
-	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput, GRPCWebFlag)
+	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get accounts: %w", err)
 	}
@@ -51,37 +54,26 @@ func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
 	return accounts, nil
 }
 
-// GetRoles fetches a list of roles from the ArgoCD RBAC config map.
+// GetRoles fetches a list of all defined roles from the `argocd-rbac-cm` ConfigMap.
+// It parses the `policy.csv` data and includes the default policy, if defined.
 func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations, error) {
-	cm, err := getRBACConfigMap()
+	var annos annotations.Annotations
+	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	policyData, okCsv := cm.Data[PolicyCSVKey]
+	policyData := cm.Data[PolicyCSVKey]
 	defaultPolicy, okDefault := cm.Data[PolicyDefaultKey]
 
-	roleNames := make(map[string]struct{})
+	roleNames, err := getRoleNamesFromCSV(policyData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse role names from policy csv: %w", err)
+	}
 
 	if okDefault && defaultPolicy != "" {
 		roleName := strings.TrimPrefix(defaultPolicy, RolePrefix)
 		roleNames[roleName] = struct{}{}
-	}
-
-	if okCsv && strings.TrimSpace(policyData) != "" {
-		bindings, policies, err := ParseArgoCDPolicyCSV(policyData)
-		if err == nil {
-			for _, binding := range bindings {
-				if binding.Role != "" {
-					roleNames[binding.Role] = struct{}{}
-				}
-			}
-			for _, policy := range policies {
-				if policy.Role != "" {
-					roleNames[policy.Role] = struct{}{}
-				}
-			}
-		}
 	}
 
 	var roles []*Role
@@ -90,15 +82,14 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 			Name: name,
 		})
 	}
-
-	var annos annotations.Annotations
 	return roles, annos, nil
 }
 
-// GetPolicyGrants fetches a list of grants from the ArgoCD RBAC config map.
+// GetPolicyGrants fetches all role assignments (`g` rules) from the `policy.csv` key
+// in the `argocd-rbac-cm` ConfigMap.
 func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotations.Annotations, error) {
 	var annos annotations.Annotations
-	cm, err := getRBACConfigMap()
+	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -126,9 +117,10 @@ func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotatio
 	return grants, annos, nil
 }
 
-// GetDefaultRole fetches the default role from the ArgoCD RBAC config map.
+// GetDefaultRole fetches the default role from the `policy.default` key
+// in the `argocd-rbac-cm` ConfigMap.
 func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
-	cm, err := getRBACConfigMap()
+	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -144,9 +136,11 @@ func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// UpdateUserRole updates the role for a user. It removes all existing roles and assigns the new one.
+// UpdateUserRole updates the role for a user within the `argocd-rbac-cm` ConfigMap.
+// It works by reading the existing `policy.csv`, removing all previous role assignments (`g` rules)
+// for the given user, and then adding a new line for the new role assignment.
 func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
-	cm, err := getRBACConfigMap()
+	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
 	}
@@ -196,8 +190,11 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 	return nil, nil
 }
 
-// CreateAccount creates a new local user in ArgoCD with the provided username and password.
-func (c *Client) CreateAccount(ctx context.Context, username string, email string, password string) (*Account, annotations.Annotations, error) {
+// CreateAccount creates a new local user in ArgoCD. This is a multi-step process:
+// 1. A new entry for the user is patched into the `argocd-cm` ConfigMap to define their capabilities (e.g., login, apiKey).
+// 2. The user's password (hashed with bcrypt) is patched into the `argocd-secret` Secret.
+// This is done via `kubectl patch` commands.
+func (c *Client) CreateAccount(ctx context.Context, username string, password string) (*Account, annotations.Annotations, error) {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to hash password: %w", err)
@@ -205,12 +202,12 @@ func (c *Client) CreateAccount(ctx context.Context, username string, email strin
 	encodedPassword := base64.StdEncoding.EncodeToString(hashedPassword)
 
 	cmPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s", "value": "%s"}]`, username, defaultAccountCapabilities)
-	if err := c.kubectlPatch("configmap", argoCDConfigMapName, cmPatch); err != nil {
+	if err := c.runKubectlCommand(ctx, "patch", "configmap", argoCDConfigMapName, NamespaceFlag, ArgocdNamespace, "--type=json", "-p", cmPatch); err != nil {
 		return nil, nil, fmt.Errorf("failed to update ConfigMap: %w", err)
 	}
 
 	secretPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s.password", "value": "%s"}]`, username, encodedPassword)
-	if err := c.kubectlPatch("secret", argoCDSecretName, secretPatch); err != nil {
+	if err := c.runKubectlCommand(ctx, "patch", "secret", argoCDSecretName, NamespaceFlag, ArgocdNamespace, "--type=json", "-p", secretPatch); err != nil {
 		return nil, nil, fmt.Errorf("failed to update Secret: %w", err)
 	}
 
@@ -223,7 +220,8 @@ func (c *Client) CreateAccount(ctx context.Context, username string, email strin
 	return account, nil, nil
 }
 
-// kubectlPatch is a helper method to patch Kubernetes resources.
+// kubectlPatch is a helper method to apply a JSON patch to a Kubernetes resource.
+// It is used to modify ConfigMaps and Secrets directly.
 func (c *Client) kubectlPatch(resourceType, resourceName, patch string) error {
 	cmd := exec.Command(
 		Kubectl,
@@ -244,4 +242,38 @@ func (c *Client) kubectlPatch(resourceType, resourceName, patch string) error {
 	}
 
 	return nil
+}
+
+// GetSubjectsForRole fetches a list of subjects (users) for a given role from the `argocd-rbac-cm` ConfigMap.
+// It parses the `policy.csv` data, looking for `g` rules that match the provided role name.
+func (c *Client) GetSubjectsForRole(ctx context.Context, roleName string) ([]string, error) {
+	cm, err := getRBACConfigMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	policyData, ok := cm.Data[PolicyCSVKey]
+	if !ok || strings.TrimSpace(policyData) == "" {
+		return nil, nil
+	}
+
+	subjectMap := make(map[string]bool)
+
+	bindings, _, err := ParseArgoCDPolicyCSV(policyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse policy CSV: %w", err)
+	}
+
+	for _, binding := range bindings {
+		if binding.Role == roleName {
+			subjectMap[binding.Subject] = true
+		}
+	}
+
+	var subjects []string
+	for subject := range subjectMap {
+		subjects = append(subjects, subject)
+	}
+
+	return subjects, nil
 }

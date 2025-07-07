@@ -15,12 +15,13 @@ import (
 
 // MockClient is a mock implementation of the ArgoCD client for testing.
 type MockClient struct {
-	GetAccountsFunc     func(ctx context.Context) ([]*client.Account, error)
-	GetRolesFunc        func(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
-	GetPolicyGrantsFunc func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
-	GetDefaultRoleFunc  func(ctx context.Context) (string, error)
-	CreateAccountFunc   func(ctx context.Context, username, email, password string) (*client.Account, annotations.Annotations, error)
-	UpdateUserRoleFunc  func(ctx context.Context, userID, roleID string) (annotations.Annotations, error)
+	GetAccountsFunc        func(ctx context.Context) ([]*client.Account, error)
+	GetRolesFunc           func(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
+	GetPolicyGrantsFunc    func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
+	GetDefaultRoleFunc     func(ctx context.Context) (string, error)
+	CreateAccountFunc      func(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error)
+	GetSubjectsForRoleFunc func(ctx context.Context, roleName string) ([]string, error)
+	UpdateUserRoleFunc     func(ctx context.Context, userID, roleID string) (annotations.Annotations, error)
 }
 
 // GetAccounts calls the mock method if it is defined.
@@ -48,9 +49,9 @@ func (m *MockClient) GetPolicyGrants(ctx context.Context) ([]*client.PolicyGrant
 }
 
 // CreateAccount calls the mock method if it is defined.
-func (m *MockClient) CreateAccount(ctx context.Context, username, email, password string) (*client.Account, annotations.Annotations, error) {
+func (m *MockClient) CreateAccount(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error) {
 	if m.CreateAccountFunc != nil {
-		return m.CreateAccountFunc(ctx, username, email, password)
+		return m.CreateAccountFunc(ctx, username, password)
 	}
 	return nil, nil, nil
 }
@@ -67,6 +68,14 @@ func (m *MockClient) GetDefaultRole(ctx context.Context) (string, error) {
 func (m *MockClient) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
 	if m.UpdateUserRoleFunc != nil {
 		return m.UpdateUserRoleFunc(ctx, userID, roleID)
+	}
+	return nil, nil
+}
+
+// GetSubjectsForRole calls the mock method if it is defined.
+func (m *MockClient) GetSubjectsForRole(ctx context.Context, roleName string) ([]string, error) {
+	if m.GetSubjectsForRoleFunc != nil {
+		return m.GetSubjectsForRoleFunc(ctx, roleName)
 	}
 	return nil, nil
 }

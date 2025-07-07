@@ -96,7 +96,7 @@ func TestUserBuilder_CreateAccountCapabilityDetails(t *testing.T) {
 func TestUserBuilder_CreateAccount(t *testing.T) {
 	t.Run("success with login", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			CreateAccountFunc: func(ctx context.Context, username string, email string, password string) (*client.Account, annotations.Annotations, error) {
+			CreateAccountFunc: func(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error) {
 				return &client.Account{
 					Name:         username,
 					Enabled:      true,
@@ -147,7 +147,7 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 
 	t.Run("error client create fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			CreateAccountFunc: func(ctx context.Context, username string, email string, password string) (*client.Account, annotations.Annotations, error) {
+			CreateAccountFunc: func(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error) {
 				return nil, nil, errors.New("create account failed")
 			},
 		}
@@ -206,7 +206,7 @@ func TestUserBuilder_ExtractUsername(t *testing.T) {
 	})
 }
 
-// Helper function to create a structpb.Struct from a map
+// Helper function to create a structpb.Struct from a map.
 func createProfile(data map[string]interface{}) *structpb.Struct {
 	profile, _ := structpb.NewStruct(data)
 	return profile

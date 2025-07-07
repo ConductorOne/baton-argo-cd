@@ -14,7 +14,7 @@ import (
 
 const PasswordMinLength = 12
 
-// parseAccountResource creates a resource for an account with comprehensive user traits including emails.
+// parseAccountResource creates a resource for an account with comprehensive user traits.
 func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	tokensStr := ""
 	if len(account.Tokens) > 0 {
@@ -30,15 +30,9 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 		"capabilities": strings.Join(account.Capabilities, ","),
 		"tokens":       tokensStr,
 	}
-	emails := extractEmailsFromAccount(account)
 
 	accountTraits := []resource.UserTraitOption{
 		resource.WithUserProfile(profile),
-	}
-
-	for i, email := range emails {
-		isPrimary := i == 0
-		accountTraits = append(accountTraits, resource.WithEmail(email, isPrimary))
 	}
 
 	return resource.NewUserResource(
@@ -49,20 +43,42 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	)
 }
 
-// extractEmailsFromAccount attempts to extract email addresses from various sources in the account data.
-func extractEmailsFromAccount(account *client.Account) []string {
-	var emails []string
-	emailSet := make(map[string]bool)
-
-	emailSet[account.Name] = true
-
-	for email := range emailSet {
-		emails = append(emails, email)
+// prepareAccountLookup creates a map for quick lookup of local account names.
+func prepareAccountLookup(accounts []*client.Account) map[string]bool {
+	lookup := make(map[string]bool)
+	for _, acc := range accounts {
+		lookup[acc.Name] = true
 	}
-
-	return emails
+	return lookup
 }
 
+// handleExplicitGrants processes policy grants for a specific role.
+func handleExplicitGrants(
+	roleResource *v2.Resource,
+	subjects []string,
+	accountsMap map[string]bool,
+) ([]*v2.Grant, error) {
+	var grants []*v2.Grant
+
+	for _, subject := range subjects {
+		if accountsMap[subject] {
+			grants = append(grants, createGrant(roleResource, subject))
+		}
+	}
+
+	return grants, nil
+}
+
+// createGrant is a helper function to create a grant.
+func createGrant(roleResource *v2.Resource, principalId string) *v2.Grant {
+	userResourceID := &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     principalId,
+	}
+	return grant.NewGrant(roleResource, assignedEntitlement, userResourceID)
+}
+
+// generateCredentials generates a random password based on the credential options.
 func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error) {
 	if credentialOptions == nil || credentialOptions.GetRandomPassword() == nil {
 		return "", errors.New("unsupported credential option: only random password is supported")
@@ -84,51 +100,11 @@ func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error
 	return password, nil
 }
 
-// prepareAccountLookup creates a map for quick lookup of local account names.
-func prepareAccountLookup(accounts []*client.Account) map[string]bool {
-	lookup := make(map[string]bool)
-	for _, acc := range accounts {
-		lookup[acc.Name] = true
-	}
-	return lookup
-}
-
-// handleExplicitGrants processes policy grants for a specific role.
-func handleExplicitGrants(
-	roleResource *v2.Resource,
-	policyGrants []*client.PolicyGrant,
-	accountsMap map[string]bool,
-	roleName string,
-) ([]*v2.Grant, map[string]bool, error) {
-	var grants []*v2.Grant
-	usersWithRole := make(map[string]bool)
-
-	for _, pg := range policyGrants {
-		isLocalUser := accountsMap[pg.Subject]
-		isForThisRole := pg.Role == roleName
-
-		if isLocalUser && isForThisRole {
-			if _, ok := usersWithRole[pg.Subject]; !ok {
-				userResource, err := resource.NewUserResource(pg.Subject, userResourceType, pg.Subject, nil)
-				if err != nil {
-					return nil, nil, err
-				}
-				grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResource.Id))
-				usersWithRole[pg.Subject] = true
-			}
-		}
-	}
-
-	return grants, usersWithRole, nil
-}
-
 // handleDefaultRoleGrants assigns the default role to any user without an explicit grant.
 func handleDefaultRoleGrants(
 	roleResource *v2.Resource,
-	accounts []*client.Account,
-	policyGrants []*client.PolicyGrant,
 	accountsMap map[string]bool,
-	usersWithExplicitRole map[string]bool,
+	policyGrants []*client.PolicyGrant,
 ) ([]*v2.Grant, error) {
 	var grants []*v2.Grant
 	usersWithAnyExplicitGrant := make(map[string]bool)
@@ -139,15 +115,9 @@ func handleDefaultRoleGrants(
 		}
 	}
 
-	for _, acc := range accounts {
-		hasExplicitGrant := usersWithAnyExplicitGrant[acc.Name]
-		alreadyHasThisRole := usersWithExplicitRole[acc.Name]
-		if !hasExplicitGrant && !alreadyHasThisRole {
-			userResource, err := resource.NewUserResource(acc.Name, userResourceType, acc.Name, nil)
-			if err != nil {
-				return nil, err
-			}
-			grants = append(grants, grant.NewGrant(roleResource, assignedEntitlement, userResource.Id))
+	for accountName := range accountsMap {
+		if _, hasGrant := usersWithAnyExplicitGrant[accountName]; !hasGrant {
+			grants = append(grants, createGrant(roleResource, accountName))
 		}
 	}
 

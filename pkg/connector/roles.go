@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"log"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
@@ -77,29 +78,40 @@ func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("failed to get users for role: %w", err)
 	}
-
-	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
-	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to get policy grants: %w", err)
-	}
-
 	accountsMap := prepareAccountLookup(accounts)
 
-	explicitGrants, usersWithRole, err := handleExplicitGrants(roleResource, policyGrants, accountsMap, roleName)
+	defaultRole, err := r.client.GetDefaultRole(ctx)
 	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to handle explicit grants: %w", err)
+		log.Printf("could not fetch default role: %v", err)
 	}
 
-	allGrants := explicitGrants
+	var allGrants []*v2.Grant
+	var annos annotations.Annotations
 
-	defaultRole, err := r.client.GetDefaultRole(ctx)
-	if err == nil && defaultRole == roleName {
-		defaultRoleGrants, err := handleDefaultRoleGrants(roleResource, accounts, policyGrants, accountsMap, usersWithRole)
+	if defaultRole != "" && roleName == defaultRole {
+		policyGrants, policyAnnos, err := r.client.GetPolicyGrants(ctx)
+		if err != nil {
+			return nil, "", policyAnnos, fmt.Errorf("failed to get policy grants for default role: %w", err)
+		}
+		annos = policyAnnos
+
+		defaultRoleGrants, err := handleDefaultRoleGrants(roleResource, accountsMap, policyGrants)
 		if err != nil {
 			return nil, "", annos, fmt.Errorf("failed to handle default role grants: %w", err)
 		}
 		allGrants = append(allGrants, defaultRoleGrants...)
 	}
+
+	subjects, err := r.client.GetSubjectsForRole(ctx, roleName)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to get subjects for role %s: %w", roleName, err)
+	}
+
+	explicitGrants, err := handleExplicitGrants(roleResource, subjects, accountsMap)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to handle explicit grants: %w", err)
+	}
+	allGrants = append(allGrants, explicitGrants...)
 
 	return allGrants, "", annos, nil
 }
@@ -147,6 +159,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 }
 
 // Revoke removes a role from a user and assigns the default role.
+// The connector assumes that revoking a role means reverting the user to a default role.
 func (r *roleBuilder) Revoke(ctx context.Context, g *v2.Grant) (annotations.Annotations, error) {
 	userID := g.Principal.Id.Resource
 	roleID := g.Entitlement.Resource.Id.Resource
