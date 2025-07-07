@@ -108,10 +108,38 @@ func ParseArgoCDPolicyCSV(data string) ([]GroupBinding, []Policy, error) {
 	return bindings, policies, nil
 }
 
+// executeCommand executes a command and returns an error if it fails.
+func executeCommand(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s command failed: %w, stderr: %s", name, err, stderr.String())
+	}
+
+	return nil
+}
+
+// executeCommandWithOutput executes a command and returns its stdout.
+func executeCommandWithOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s command failed: %w, stderr: %s", name, err, stderr.String())
+	}
+
+	return stdout.Bytes(), nil
+}
+
 // getRBACConfigMap fetches and unmarshals the argocd-rbac-cm ConfigMap from the Kubernetes cluster.
-func getRBACConfigMap() (*ConfigMap, error) {
-	cmd := exec.Command(
-		Kubectl,
+func getRBACConfigMap(ctx context.Context) (*ConfigMap, error) {
+	outputBytes, err := executeCommandWithOutput(ctx, Kubectl,
 		GetCommand,
 		ConfigMapResource,
 		RBACConfigMapName,
@@ -120,18 +148,11 @@ func getRBACConfigMap() (*ConfigMap, error) {
 		OutputFlag,
 		JSONOutput,
 	)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("kubectl command failed to fetch ConfigMap '%s' in namespace '%s': %w. stderr: %s",
-			RBACConfigMapName, ArgocdNamespace, err, stderr.String())
+	if err != nil {
+		return nil, fmt.Errorf("kubectl command failed to fetch ConfigMap '%s' in namespace '%s': %w",
+			RBACConfigMapName, ArgocdNamespace, err)
 	}
 
-	outputBytes := stdout.Bytes()
 	if len(outputBytes) == 0 {
 		return nil, fmt.Errorf("kubectl command returned empty output for ConfigMap '%s'", RBACConfigMapName)
 	}
@@ -188,16 +209,7 @@ func (c *Client) ensureLoggedIn(ctx context.Context) error {
 
 // runArgoCDCommandDirect executes an ArgoCD CLI command without ensuring login first.
 func (c *Client) runArgoCDCommandDirect(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, ArgoCDCommand, args...)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("argocd command failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	return nil
+	return executeCommand(ctx, ArgoCDCommand, args...)
 }
 
 // runArgoCDCommandWithOutput executes an ArgoCD CLI command and returns the output.
@@ -206,17 +218,12 @@ func (c *Client) runArgoCDCommandWithOutput(ctx context.Context, args ...string)
 		return nil, fmt.Errorf("failed to ensure login: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, ArgoCDCommand, args...)
+	return executeCommandWithOutput(ctx, ArgoCDCommand, args...)
+}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("argocd command failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	return stdout.Bytes(), nil
+// runKubectlCommand executes a kubectl command and returns an error if it fails.
+func (c *Client) runKubectlCommand(ctx context.Context, args ...string) error {
+	return executeCommand(ctx, Kubectl, args...)
 }
 
 // getRoleNamesFromCSV extracts all unique role names from the policy CSV data.
