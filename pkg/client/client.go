@@ -20,8 +20,8 @@ const (
 	defaultAccountCapabilities = "apiKey, login"
 )
 
-// Client provides methods to interact with Argo CD, primarily through its command-line interface (CLI)
-// and by directly manipulating its underlying Kubernetes resources (ConfigMaps and Secrets).
+// Client provides methods to interact with Argo CD, primarily through its command-line interface (CLI).
+// It also directly manipulates its underlying Kubernetes resources (ConfigMaps and Secrets).
 // This approach is taken to manage RBAC and user accounts.
 type Client struct {
 	apiUrl   string
@@ -39,7 +39,8 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 	}
 }
 
-// GetAccounts fetches a list of all user accounts from ArgoCD by calling `argocd account list`.
+// GetAccounts fetches a list of real accounts from ArgoCD using the CLI.
+// Command: argocd account list --output json.
 func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
 	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput)
 	if err != nil {
@@ -54,8 +55,8 @@ func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
 	return accounts, nil
 }
 
-// GetRoles fetches a list of all defined roles from the `argocd-rbac-cm` ConfigMap.
-// It parses the `policy.csv` data and includes the default policy, if defined.
+// GetRoles fetches a list of roles from the ArgoCD RBAC config map.
+// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
 func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations, error) {
 	var annos annotations.Annotations
 	cm, err := getRBACConfigMap(ctx)
@@ -85,8 +86,8 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 	return roles, annos, nil
 }
 
-// GetPolicyGrants fetches all role assignments (`g` rules) from the `policy.csv` key
-// in the `argocd-rbac-cm` ConfigMap.
+// GetPolicyGrants fetches a list of grants from the ArgoCD RBAC config map.
+// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
 func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotations.Annotations, error) {
 	var annos annotations.Annotations
 	cm, err := getRBACConfigMap(ctx)
@@ -117,8 +118,8 @@ func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotatio
 	return grants, annos, nil
 }
 
-// GetDefaultRole fetches the default role from the `policy.default` key
-// in the `argocd-rbac-cm` ConfigMap.
+// GetDefaultRole fetches the default role from the ArgoCD RBAC config map.
+// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
 func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
@@ -190,10 +191,9 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 	return nil, nil
 }
 
-// CreateAccount creates a new local user in ArgoCD. This is a multi-step process:
-// 1. A new entry for the user is patched into the `argocd-cm` ConfigMap to define their capabilities (e.g., login, apiKey).
-// 2. The user's password (hashed with bcrypt) is patched into the `argocd-secret` Secret.
-// This is done via `kubectl patch` commands.
+// CreateAccount creates a new local user in ArgoCD with the provided username and password.
+// Command: kubectl patch configmap argocd-cm -n argocd --type=json -p '[{"op": "add", "path": "/data/accounts.USERNAME", "value": "apiKey, login"}]'.
+// Command: kubectl patch secret argocd-secret -n argocd --type=json -p '[{"op": "add", "path": "/data/accounts.USERNAME.password", "value": "ENCODED_PASSWORD"}]'.
 func (c *Client) CreateAccount(ctx context.Context, username string, password string) (*Account, annotations.Annotations, error) {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -244,8 +244,8 @@ func (c *Client) kubectlPatch(resourceType, resourceName, patch string) error {
 	return nil
 }
 
-// GetSubjectsForRole fetches a list of subjects (users) for a given role from the `argocd-rbac-cm` ConfigMap.
-// It parses the `policy.csv` data, looking for `g` rules that match the provided role name.
+// GetSubjectsForRole fetches a list of subjects for a given role from the ArgoCD RBAC config map.
+// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
 func (c *Client) GetSubjectsForRole(ctx context.Context, roleName string) ([]string, error) {
 	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
