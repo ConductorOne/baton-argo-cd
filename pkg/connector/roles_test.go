@@ -15,6 +15,10 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+const (
+	defaultRoleName = "default-role"
+)
+
 // TestRoleBuilder_List tests the List method of the RoleBuilder.
 func TestRoleBuilder_List(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
@@ -113,7 +117,7 @@ func TestRoleBuilder_Grants(t *testing.T) {
 
 	t.Run("success for default role", func(t *testing.T) {
 		roleResource := &v2.Resource{
-			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "default-role"},
+			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: defaultRoleName},
 		}
 		mockCli := &test.MockClient{
 			GetAccountsFunc: func(ctx context.Context) ([]*client.Account, error) {
@@ -123,7 +127,7 @@ func TestRoleBuilder_Grants(t *testing.T) {
 				return nil, nil, nil
 			},
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "default-role", nil
+				return defaultRoleName, nil
 			},
 			GetSubjectsForRoleFunc: func(ctx context.Context, roleName string) ([]string, error) {
 				return nil, nil
@@ -263,14 +267,14 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		mockCli := &test.MockClient{
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "default-role", nil
+				return defaultRoleName, nil
 			},
 			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
 				return []*client.PolicyGrant{{Subject: "test-user", Role: "role-to-revoke"}}, nil, nil
 			},
 			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
 				assert.Equal(t, "test-user", userID)
-				assert.Equal(t, "default-role", roleID)
+				assert.Equal(t, defaultRoleName, roleID)
 				return nil, nil
 			},
 		}
@@ -292,14 +296,14 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 				Resource: &v2.Resource{
 					Id: &v2.ResourceId{
 						ResourceType: roleResourceType.Id,
-						Resource:     "default-role",
+						Resource:     defaultRoleName,
 					},
 				},
 			},
 		}
 		mockCli := &test.MockClient{
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "default-role", nil
+				return defaultRoleName, nil
 			},
 		}
 		builder := newRoleBuilder(mockCli)
@@ -312,10 +316,10 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 	t.Run("already revoked - user already has default role", func(t *testing.T) {
 		mockCli := &test.MockClient{
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "default-role", nil
+				return defaultRoleName, nil
 			},
 			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{{Subject: "test-user", Role: "default-role"}}, nil, nil
+				return []*client.PolicyGrant{{Subject: "test-user", Role: defaultRoleName}}, nil, nil
 			},
 		}
 		builder := newRoleBuilder(mockCli)
@@ -340,7 +344,7 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 	t.Run("get policy grants fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "default-role", nil
+				return defaultRoleName, nil
 			},
 			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
 				return nil, nil, errors.New("policy error")
@@ -355,7 +359,7 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 	t.Run("update user role fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
 			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "default-role", nil
+				return defaultRoleName, nil
 			},
 			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
 				return []*client.PolicyGrant{{Subject: "test-user", Role: "role-to-revoke"}}, nil, nil
@@ -367,6 +371,6 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 		builder := newRoleBuilder(mockCli)
 		_, err := builder.Revoke(context.Background(), grantToRevoke)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to set default role")
+		assert.Contains(t, err.Error(), "failed to update user role")
 	})
 }

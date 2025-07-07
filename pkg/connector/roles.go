@@ -185,18 +185,13 @@ func (r *roleBuilder) Revoke(ctx context.Context, g *v2.Grant) (annotations.Anno
 		}
 	}
 
-	isAlreadyDefault := false
 	if len(userRoles) == 1 && userRoles[0] == defaultRole {
-		isAlreadyDefault = true
-	}
-
-	if isAlreadyDefault {
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
 
 	annos, err = r.client.UpdateUserRole(ctx, userID, defaultRole)
 	if err != nil {
-		return annos, fmt.Errorf("failed to set default role: %w", err)
+		return annos, fmt.Errorf("failed to update user role: %w", err)
 	}
 
 	return annos, nil

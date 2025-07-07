@@ -1,12 +1,10 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/conductorone/baton-sdk/pkg/annotations"
@@ -140,6 +138,7 @@ func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 // UpdateUserRole updates the role for a user within the `argocd-rbac-cm` ConfigMap.
 // It works by reading the existing `policy.csv`, removing all previous role assignments (`g` rules)
 // for the given user, and then adding a new line for the new role assignment.
+// Command: kubectl patch configmap argocd-rbac-cm -n argocd --type=json -p '[{"op": "replace", "path": "/data/policy.csv", "value": "g, USER_ID, ROLE_ID"}]'.
 func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
 	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
@@ -169,7 +168,7 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 
 	updatedPolicyCsv := strings.Join(newLines, "\n")
 
-	// JSON escape the string for the patch
+	// JSON escape the string for the patch.
 	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal policy csv for patch: %w", err)
@@ -184,7 +183,16 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 		patch = fmt.Sprintf(`[{"op": "add", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
 	}
 
-	if err := c.kubectlPatch("configmap", RBACConfigMapName, patch); err != nil {
+	if err := c.runKubectlCommand(
+		ctx,
+		"patch",
+		"configmap",
+		RBACConfigMapName,
+		NamespaceFlag,
+		ArgocdNamespace,
+		"--type=json",
+		fmt.Sprintf("-p=%s", patch),
+	); err != nil {
 		return nil, fmt.Errorf("failed to patch rbac configmap: %w", err)
 	}
 
@@ -218,30 +226,6 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 	}
 
 	return account, nil, nil
-}
-
-// kubectlPatch is a helper method to apply a JSON patch to a Kubernetes resource.
-// It is used to modify ConfigMaps and Secrets directly.
-func (c *Client) kubectlPatch(resourceType, resourceName, patch string) error {
-	cmd := exec.Command(
-		Kubectl,
-		"patch",
-		resourceType,
-		resourceName,
-		NamespaceFlag,
-		ArgocdNamespace,
-		"--type=json",
-		fmt.Sprintf("-p=%s", patch),
-	)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("kubectl patch failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	return nil
 }
 
 // GetSubjectsForRole fetches a list of subjects for a given role from the ArgoCD RBAC config map.

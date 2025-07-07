@@ -48,6 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BATON_LOG_LEVEL: debug
+      TEST_USER: "admin"
+      TEST_ROLE: "developers"
+      PRINCIPAL_ID: "admin"
+      PRINCIPAL_TYPE: "user"
+      ENTITLEMENT_ID: "role:developers:assigned"
+      GRANT_ID: "role:developers:assigned:user:admin"
     steps:
       - name: Install Go
         uses: actions/setup-go@v5
@@ -79,18 +85,28 @@ jobs:
 
           kubectl patch configmap argocd-rbac-cm -n argocd \
             --type=merge \
-            -p '{"data":{"policy.csv":"p, role:admin, applications, *, *, allow\np, role:admin, apikey, *, *, allow\n"}}'
+            -p '{"data":{"policy.csv":"p, role:admin, applications, *, *, allow\np, role:admin, apikey, *, *, allow\np, role:developers, applications, get, default/*, allow\n"}}'
 
           kubectl rollout restart deployment argocd-server -n argocd
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=argocd-server -n argocd --timeout=2m
 
-      - name: Test Connector
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install baton
+        run: |
+          chmod +x ./scripts/get-baton.sh
+          ./scripts/get-baton.sh
+          sudo mv baton /usr/local/bin/
+
+      - name: Run Grant and Revoke Tests
         run: |
           set -ex
 
           echo "Starting port-forward..."
           kubectl port-forward svc/argocd-server -n argocd 8080:80 >/dev/null 2>&1 &
           PORT_FORWARD_PID=$!
+          trap "echo 'Cleaning up port-forward process...'; kill $PORT_FORWARD_PID" EXIT
 
           echo "Waiting for port-forward..."
           for i in {1..30}; do
@@ -102,7 +118,6 @@ jobs:
           done
           if ! nc -z 127.0.0.1 8080; then
               echo "Port-forward failed to start."
-              kill $PORT_FORWARD_PID
               exit 1
           fi
 
@@ -111,20 +126,36 @@ jobs:
 
           go build -o baton-argo-cd ./cmd/baton-argo-cd
 
-          ./baton-argo-cd \
-            --api-url "http://127.0.0.1:8080" \
-            --username "admin" \
-            --password "$ARGO_CD_PASSWORD" \
-            --log-level debug \
-            --file sync.c1z
+          BATON_ARGS="--api-url http://127.0.0.1:8080 --username admin --password $ARGO_CD_PASSWORD --log-level debug"
 
+          ./baton-argo-cd $BATON_ARGS --file sync.c1z
           if [ ! -f "sync.c1z" ]; then
             echo "Error: File sync.c1z was not generated."
-            kill $PORT_FORWARD_PID
             exit 1
           fi
 
-          ./baton-argo-cd --help
+          echo "Granting entitlement..."
+          ./baton-argo-cd $BATON_ARGS \
+            --grant-entitlement "$ENTITLEMENT_ID" \
+            --grant-principal "$PRINCIPAL_ID" \
+            --grant-principal-type "$PRINCIPAL_TYPE"
 
-          echo "Cleaning up port-forward process..."
-          kill $PORT_FORWARD_PID
+          echo "Re-syncing after grant..."
+          ./baton-argo-cd $BATON_ARGS --file sync.c1z
+
+          echo "Verifying grant..."
+          baton grants --entitlement="$ENTITLEMENT_ID" --file sync.c1z --output-format=json | jq -e --arg principal "$PRINCIPAL_ID" 'any((.grants // []); .principal.id.resource == $principal)'
+
+          echo "Revoking grant..."
+          ./baton-argo-cd $BATON_ARGS --revoke-grant "$GRANT_ID"
+
+          echo "Re-syncing after revoke..."
+          ./baton-argo-cd $BATON_ARGS --file sync.c1z
+
+          echo "Verifying revoke..."
+          if baton grants --entitlement="$ENTITLEMENT_ID" --file sync.c1z --output-format=json | jq -e --arg principal "$PRINCIPAL_ID" 'any((.grants // []); .principal.id.resource == $principal)'; then
+            echo "Error: Grant was not revoked."
+            exit 1
+          else
+            echo "Grant successfully revoked."
+          fi
