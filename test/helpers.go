@@ -22,6 +22,7 @@ type MockClient struct {
 	CreateAccountFunc      func(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error)
 	GetSubjectsForRoleFunc func(ctx context.Context, roleName string) ([]string, error)
 	UpdateUserRoleFunc     func(ctx context.Context, userID, roleID string) (annotations.Annotations, error)
+	RemoveUserRoleFunc     func(ctx context.Context, userID, roleID string) (annotations.Annotations, error)
 }
 
 // GetAccounts calls the mock method if it is defined.
@@ -68,6 +69,14 @@ func (m *MockClient) GetDefaultRole(ctx context.Context) (string, error) {
 func (m *MockClient) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
 	if m.UpdateUserRoleFunc != nil {
 		return m.UpdateUserRoleFunc(ctx, userID, roleID)
+	}
+	return nil, nil
+}
+
+// RemoveUserRole calls the mock method if it is defined.
+func (m *MockClient) RemoveUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+	if m.RemoveUserRoleFunc != nil {
+		return m.RemoveUserRoleFunc(ctx, userID, roleID)
 	}
 	return nil, nil
 }

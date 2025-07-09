@@ -7,6 +7,7 @@
 Check out [Baton](https://github.com/conductorone/baton) to learn more the project in general.
 
 # Prerequisites
+
 No prerequisites were specified for `baton-argo-cd`
 
 # Getting Started
@@ -39,10 +40,12 @@ baton resources
 
 # Data Model
 
-`baton-argo-cd` will pull down information about the following resources:
-- Users
+`baton-argo-cd` will pull down information about the following resources from ArgoCD:
 
-`baton-argo-cd` does not specify supporting account provisioning or entitlement provisioning.
+- Users
+- Roles
+
+This connector supports account provisioning for users and entitlement provisioning for roles.
 
 # Contributing, Support and Issues
 
@@ -68,6 +71,9 @@ Available Commands:
   help               Help about any command
 
 Flags:
+      --username  string             The username used to authenticate with Argo CD
+      --password  string             The password used to authenticate with Argo CD
+      --api-url   string             The API URL
       --client-id string             The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string         The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
   -f, --file string                  The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")

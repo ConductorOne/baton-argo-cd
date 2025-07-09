@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestNewClient tests the NewClient function.
@@ -29,4 +30,19 @@ func TestGetAccounts_Integration(t *testing.T) {
 	accounts, err := client.GetAccounts(ctx)
 	assert.NoError(t, err)
 	assert.NotNil(t, accounts)
+}
+
+func TestUpdateUserRole_AlreadyExists(t *testing.T) {
+	t.Skip("This test requires a running Kubernetes cluster with Argo CD installed.")
+	ctx := context.Background()
+	client := NewClient(ctx, "127.0.0.1:8080", "admin", "password")
+
+	userID := "test-user"
+	roleID := "test-role"
+
+	_, err := client.UpdateUserRole(ctx, userID, roleID)
+	require.NoError(t, err)
+
+	_, err = client.UpdateUserRole(ctx, userID, roleID)
+	assert.NoError(t, err)
 }

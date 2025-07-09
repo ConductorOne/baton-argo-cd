@@ -200,40 +200,27 @@ func TestRoleBuilder_Grant(t *testing.T) {
 			Resource: &v2.Resource{
 				Id: &v2.ResourceId{
 					ResourceType: roleResourceType.Id,
-					Resource:     "existing-role",
+					Resource:     "new-role",
 				},
 			},
 		}
 		mockCli := &test.MockClient{
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{{Subject: "test-user", Role: "existing-role"}}, nil, nil
+			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+				assert.Equal(t, "test-user", userID)
+				assert.Equal(t, "new-role", roleID)
+				return nil, nil
 			},
 		}
 		builder := newRoleBuilder(mockCli)
 		grants, annos, err := builder.Grant(context.Background(), principal, entitlement)
 		require.NoError(t, err)
-		assert.Nil(t, grants)
-		assert.NotNil(t, annos)
-		assert.True(t, hasAnnotation(annos, &v2.GrantAlreadyExists{}))
-	})
-
-	t.Run("get policy grants fails", func(t *testing.T) {
-		mockCli := &test.MockClient{
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return nil, nil, errors.New("policy error")
-			},
-		}
-		builder := newRoleBuilder(mockCli)
-		_, _, err := builder.Grant(context.Background(), principal, entitlement)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get policy grants")
+		assert.NotNil(t, grants)
+		assert.Len(t, grants, 1)
+		assert.Nil(t, annos)
 	})
 
 	t.Run("update user role fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{{Subject: "test-user", Role: "old-role"}}, nil, nil
-			},
 			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
 				return nil, errors.New("update error")
 			},
@@ -266,15 +253,9 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return defaultRoleName, nil
-			},
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{{Subject: "test-user", Role: "role-to-revoke"}}, nil, nil
-			},
-			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+			RemoveUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
 				assert.Equal(t, "test-user", userID)
-				assert.Equal(t, defaultRoleName, roleID)
+				assert.Equal(t, "role-to-revoke", roleID)
 				return nil, nil
 			},
 		}
@@ -284,26 +265,10 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 		assert.Nil(t, annos)
 	})
 
-	t.Run("already revoked - role is default", func(t *testing.T) {
-		grantToRevoke := &v2.Grant{
-			Principal: &v2.Resource{
-				Id: &v2.ResourceId{
-					ResourceType: userResourceType.Id,
-					Resource:     "test-user",
-				},
-			},
-			Entitlement: &v2.Entitlement{
-				Resource: &v2.Resource{
-					Id: &v2.ResourceId{
-						ResourceType: roleResourceType.Id,
-						Resource:     defaultRoleName,
-					},
-				},
-			},
-		}
+	t.Run("already revoked", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return defaultRoleName, nil
+			RemoveUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+				return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 			},
 		}
 		builder := newRoleBuilder(mockCli)
@@ -313,64 +278,15 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 		assert.True(t, hasAnnotation(annos, &v2.GrantAlreadyRevoked{}))
 	})
 
-	t.Run("already revoked - user already has default role", func(t *testing.T) {
+	t.Run("remove user role fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return defaultRoleName, nil
-			},
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{{Subject: "test-user", Role: defaultRoleName}}, nil, nil
-			},
-		}
-		builder := newRoleBuilder(mockCli)
-		annos, err := builder.Revoke(context.Background(), grantToRevoke)
-		require.NoError(t, err)
-		assert.NotNil(t, annos)
-		assert.True(t, hasAnnotation(annos, &v2.GrantAlreadyRevoked{}))
-	})
-
-	t.Run("get default role fails", func(t *testing.T) {
-		mockCli := &test.MockClient{
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "", errors.New("default role error")
+			RemoveUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+				return nil, errors.New("remove error")
 			},
 		}
 		builder := newRoleBuilder(mockCli)
 		_, err := builder.Revoke(context.Background(), grantToRevoke)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get default role")
-	})
-
-	t.Run("get policy grants fails", func(t *testing.T) {
-		mockCli := &test.MockClient{
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return defaultRoleName, nil
-			},
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return nil, nil, errors.New("policy error")
-			},
-		}
-		builder := newRoleBuilder(mockCli)
-		_, err := builder.Revoke(context.Background(), grantToRevoke)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get policy grants")
-	})
-
-	t.Run("update user role fails", func(t *testing.T) {
-		mockCli := &test.MockClient{
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return defaultRoleName, nil
-			},
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{{Subject: "test-user", Role: "role-to-revoke"}}, nil, nil
-			},
-			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
-				return nil, errors.New("update error")
-			},
-		}
-		builder := newRoleBuilder(mockCli)
-		_, err := builder.Revoke(context.Background(), grantToRevoke)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to update user role")
+		assert.Contains(t, err.Error(), "failed to remove user role")
 	})
 }

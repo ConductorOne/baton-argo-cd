@@ -1,12 +1,15 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -136,8 +139,8 @@ func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 }
 
 // UpdateUserRole updates the role for a user within the `argocd-rbac-cm` ConfigMap.
-// It works by reading the existing `policy.csv`, removing all previous role assignments (`g` rules)
-// for the given user, and then adding a new line for the new role assignment.
+// It works by reading the existing `policy.csv`, checking if the user already has the role,
+// and if not, adding a new line for the new role assignment.
 // Command: kubectl patch configmap argocd-rbac-cm -n argocd --type=json -p '[{"op": "replace", "path": "/data/policy.csv", "value": "g, USER_ID, ROLE_ID"}]'.
 func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
 	cm, err := getRBACConfigMap(ctx)
@@ -150,25 +153,41 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 		policyCsv = ""
 	}
 
-	lines := strings.Split(policyCsv, "\n")
-	var newLines []string
+	reader := csv.NewReader(strings.NewReader(policyCsv))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
 
-	userGrantPrefix := fmt.Sprintf("g, %s, ", userID)
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine == "" {
-			continue
-		}
-		if !strings.HasPrefix(trimmedLine, userGrantPrefix) {
-			newLines = append(newLines, trimmedLine)
-		}
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
 	}
 
-	newLines = append(newLines, fmt.Sprintf("g, %s, %s", userID, roleID))
+	var newRecords [][]string
+	userGrantPrefix := "g"
+	roleExists := false
+	for _, record := range records {
+		if len(record) > 1 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
+			roleExists = true
+		}
+		newRecords = append(newRecords, record)
+	}
 
-	updatedPolicyCsv := strings.Join(newLines, "\n")
+	if roleExists {
+		return nil, nil
+	}
 
-	// JSON escape the string for the patch.
+	newRecords = append(newRecords, []string{"g", userID, roleID})
+
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+	if err := writer.WriteAll(newRecords); err != nil {
+		return nil, fmt.Errorf("failed to write policy csv: %w", err)
+	}
+	writer.Flush()
+
+	updatedPolicyCsv := buf.String()
+
 	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal policy csv for patch: %w", err)
@@ -176,12 +195,79 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 
 	var patch string
 	if ok {
-		// If the key exists, replace it
 		patch = fmt.Sprintf(`[{"op": "replace", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
 	} else {
-		// If the key doesn't exist, add it
 		patch = fmt.Sprintf(`[{"op": "add", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
 	}
+
+	if err := c.runKubectlCommand(
+		ctx,
+		"patch",
+		"configmap",
+		RBACConfigMapName,
+		NamespaceFlag,
+		ArgocdNamespace,
+		"--type=json",
+		fmt.Sprintf("-p=%s", patch),
+	); err != nil {
+		return nil, fmt.Errorf("failed to patch rbac configmap: %w", err)
+	}
+
+	return nil, nil
+}
+
+// RemoveUserRole removes a role from a user within the `argocd-rbac-cm` ConfigMap.
+func (c *Client) RemoveUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+	cm, err := getRBACConfigMap(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
+	}
+
+	policyCsv, ok := cm.Data[PolicyCSVKey]
+	if !ok {
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+	}
+
+	reader := csv.NewReader(strings.NewReader(policyCsv))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
+	}
+
+	var newRecords [][]string
+	var userGrantPrefix = "g"
+	var roleRemoved bool
+
+	for _, record := range records {
+		if len(record) > 1 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
+			roleRemoved = true
+			continue
+		}
+		newRecords = append(newRecords, record)
+	}
+
+	if !roleRemoved {
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+	}
+
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+	if err := writer.WriteAll(newRecords); err != nil {
+		return nil, fmt.Errorf("failed to write policy csv: %w", err)
+	}
+	writer.Flush()
+
+	updatedPolicyCsv := buf.String()
+	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal policy csv for patch: %w", err)
+	}
+
+	patch := fmt.Sprintf(`[{"op": "replace", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
 
 	if err := c.runKubectlCommand(
 		ctx,
