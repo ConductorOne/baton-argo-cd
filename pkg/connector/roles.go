@@ -88,6 +88,17 @@ func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *
 	var allGrants []*v2.Grant
 	var annos annotations.Annotations
 
+	subjects, err := r.client.GetSubjectsForRole(ctx, roleName)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to get subjects for role %s: %w", roleName, err)
+	}
+
+	explicitGrants, err := handleExplicitGrants(roleResource, subjects, accountsMap)
+	if err != nil {
+		return nil, "", annos, fmt.Errorf("failed to handle explicit grants: %w", err)
+	}
+	allGrants = append(allGrants, explicitGrants...)
+
 	if defaultRole != "" && roleName == defaultRole {
 		policyGrants, policyAnnos, err := r.client.GetPolicyGrants(ctx)
 		if err != nil {
@@ -102,28 +113,49 @@ func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *
 		allGrants = append(allGrants, defaultRoleGrants...)
 	}
 
-	subjects, err := r.client.GetSubjectsForRole(ctx, roleName)
-	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to get subjects for role %s: %w", roleName, err)
-	}
-
-	explicitGrants, err := handleExplicitGrants(roleResource, subjects, accountsMap)
-	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to handle explicit grants: %w", err)
-	}
-	allGrants = append(allGrants, explicitGrants...)
-
 	return allGrants, "", annos, nil
 }
 
-// Grant assigns a role to a user. It replaces any existing roles.
+// Grant assigns a role to a user, adding it to any existing roles.
+// If the user only has a default role, it will be made explicit.
 func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) ([]*v2.Grant, annotations.Annotations, error) {
 	userID := principal.Id.Resource
 	roleID := entitlement.Resource.Id.Resource
 
-	annos, err := r.client.UpdateUserRole(ctx, userID, roleID)
+	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
+	if err != nil {
+		return nil, annos, fmt.Errorf("failed to get policy grants: %w", err)
+	}
+
+	userHasExplicitRole := false
+	for _, pg := range policyGrants {
+		if pg.Subject == userID {
+			userHasExplicitRole = true
+			break
+		}
+	}
+
+	if !userHasExplicitRole {
+		defaultRole, err := r.client.GetDefaultRole(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get default role: %w", err)
+		}
+
+		if defaultRole != "" && defaultRole != roleID {
+			_, err := r.client.UpdateUserRole(ctx, userID, defaultRole)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to grant default role to user: %w", err)
+			}
+		}
+	}
+
+	annos, err = r.client.UpdateUserRole(ctx, userID, roleID)
 	if err != nil {
 		return nil, annos, fmt.Errorf("failed to update user role: %w", err)
+	}
+
+	if annos != nil {
+		return nil, annos, nil
 	}
 
 	grantObj := grant.NewGrant(

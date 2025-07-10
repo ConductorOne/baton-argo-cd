@@ -19,6 +19,7 @@ const (
 	argoCDSecretName           = "argocd-secret"
 	argoCDConfigMapName        = "argocd-cm"
 	defaultAccountCapabilities = "apiKey, login"
+	userGrantPrefix            = "g"
 )
 
 // Client provides methods to interact with Argo CD, primarily through its command-line interface (CLI).
@@ -163,28 +164,25 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
 	}
 
-	var newRecords [][]string
-	userGrantPrefix := "g"
 	roleExists := false
 	for _, record := range records {
-		if len(record) > 1 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
+		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
 			roleExists = true
+			break
 		}
-		newRecords = append(newRecords, record)
 	}
 
 	if roleExists {
-		return nil, nil
+		return annotations.New(&v2.GrantAlreadyExists{}), nil
 	}
 
-	newRecords = append(newRecords, []string{"g", userID, roleID})
+	records = append(records, []string{userGrantPrefix, userID, roleID})
 
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
-	if err := writer.WriteAll(newRecords); err != nil {
+	if err := writer.WriteAll(records); err != nil {
 		return nil, fmt.Errorf("failed to write policy csv: %w", err)
 	}
-	writer.Flush()
 
 	updatedPolicyCsv := buf.String()
 
@@ -239,11 +237,10 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID, roleID string) (ann
 	}
 
 	var newRecords [][]string
-	var userGrantPrefix = "g"
 	var roleRemoved bool
 
 	for _, record := range records {
-		if len(record) > 1 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
+		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
 			roleRemoved = true
 			continue
 		}
@@ -259,7 +256,6 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID, roleID string) (ann
 	if err := writer.WriteAll(newRecords); err != nil {
 		return nil, fmt.Errorf("failed to write policy csv: %w", err)
 	}
-	writer.Flush()
 
 	updatedPolicyCsv := buf.String()
 	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
