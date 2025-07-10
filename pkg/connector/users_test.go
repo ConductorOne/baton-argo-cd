@@ -97,6 +97,8 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 	t.Run("success with login", func(t *testing.T) {
 		mockCli := &test.MockClient{
 			CreateAccountFunc: func(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error) {
+				assert.Equal(t, "test-user", username)
+				assert.NotEmpty(t, password)
 				return &client.Account{
 					Name:         username,
 					Enabled:      true,

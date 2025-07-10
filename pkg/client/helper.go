@@ -45,28 +45,21 @@ const (
 )
 
 // ParseArgoCDPolicyCSV parses ArgoCD policy CSV data into group bindings and policies.
-func ParseArgoCDPolicyCSV(data string) ([]GroupBinding, []Policy, error) {
-	var bindings []GroupBinding
-	var policies []Policy
-
-	reader := csv.NewReader(strings.NewReader(data))
-	reader.TrimLeadingSpace = true
+func ParseArgoCDPolicyCSV(csvData string) ([]*PolicyBinding, []*PolicyDefinition, error) {
+	reader := csv.NewReader(strings.NewReader(csvData))
 	reader.Comment = '#'
-	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
 	reader.FieldsPerRecord = -1
 
-	lineNum := 0
-	for {
-		fields, err := reader.Read()
-		lineNum++
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, nil, err
+	}
 
-		if err != nil {
-			if err.Error() == "EOF" {
-				break
-			}
-			continue
-		}
+	var bindings []*PolicyBinding
+	var policies []*PolicyDefinition
 
+	for _, fields := range records {
 		if len(fields) == 0 {
 			continue
 		}
@@ -79,7 +72,7 @@ func ParseArgoCDPolicyCSV(data string) ([]GroupBinding, []Policy, error) {
 		case "g":
 			if len(fields) >= 3 {
 				role := strings.TrimPrefix(fields[2], RolePrefix)
-				bindings = append(bindings, GroupBinding{
+				bindings = append(bindings, &PolicyBinding{
 					Subject: fields[1],
 					Role:    role,
 				})
@@ -88,16 +81,10 @@ func ParseArgoCDPolicyCSV(data string) ([]GroupBinding, []Policy, error) {
 		case "p":
 			if len(fields) >= 4 {
 				role := strings.TrimPrefix(fields[1], RolePrefix)
-				effect := "allow"
-				if len(fields) >= 5 && fields[4] != "" {
-					effect = fields[4]
-				}
-
-				policies = append(policies, Policy{
+				policies = append(policies, &PolicyDefinition{
 					Role:     role,
 					Resource: fields[2],
 					Action:   fields[3],
-					Effect:   effect,
 				})
 			}
 		default:
@@ -227,25 +214,46 @@ func (c *Client) runKubectlCommand(ctx context.Context, args ...string) error {
 }
 
 // getRoleNamesFromCSV extracts all unique role names from the policy CSV data.
-func getRoleNamesFromCSV(policyData string) (map[string]struct{}, error) {
-	roleNames := make(map[string]struct{})
-	if strings.TrimSpace(policyData) == "" {
-		return roleNames, nil
-	}
+func getRoleNamesFromCSV(csvData string) (map[string]struct{}, error) {
+	reader := csv.NewReader(strings.NewReader(csvData))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
 
-	bindings, policies, err := ParseArgoCDPolicyCSV(policyData)
+	records, err := reader.ReadAll()
 	if err != nil {
 		return nil, err
 	}
 
-	for _, binding := range bindings {
-		if binding.Role != "" {
-			roleNames[binding.Role] = struct{}{}
+	roleNames := make(map[string]struct{})
+
+	for _, fields := range records {
+		if len(fields) == 0 {
+			continue
 		}
-	}
-	for _, policy := range policies {
-		if policy.Role != "" {
-			roleNames[policy.Role] = struct{}{}
+
+		for i := range fields {
+			fields[i] = strings.TrimSpace(fields[i])
+		}
+
+		switch fields[0] {
+		case "g":
+			if len(fields) >= 3 {
+				role := strings.TrimPrefix(fields[2], RolePrefix)
+				if role != "" {
+					roleNames[role] = struct{}{}
+				}
+			}
+
+		case "p":
+			if len(fields) >= 4 {
+				role := strings.TrimPrefix(fields[1], RolePrefix)
+				if role != "" {
+					roleNames[role] = struct{}{}
+				}
+			}
+		default:
+			continue
 		}
 	}
 

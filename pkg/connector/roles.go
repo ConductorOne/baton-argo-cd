@@ -116,7 +116,8 @@ func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *
 	return allGrants, "", annos, nil
 }
 
-// Grant assigns a role to a user. It replaces any existing roles.
+// Grant assigns a role to a user, adding it to any existing roles.
+// If the user only has a default role, it will be made explicit.
 func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) ([]*v2.Grant, annotations.Annotations, error) {
 	userID := principal.Id.Resource
 	roleID := entitlement.Resource.Id.Resource
@@ -126,27 +127,35 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 		return nil, annos, fmt.Errorf("failed to get policy grants: %w", err)
 	}
 
-	var userRoles []string
-	for _, p := range policyGrants {
-		if p.Subject == userID {
-			userRoles = append(userRoles, p.Role)
-		}
-	}
-
-	hasRole := false
-	for _, role := range userRoles {
-		if role == roleID {
-			hasRole = true
+	userHasExplicitRole := false
+	for _, pg := range policyGrants {
+		if pg.Subject == userID {
+			userHasExplicitRole = true
 			break
 		}
 	}
-	if hasRole && len(userRoles) == 1 {
-		return nil, annotations.New(&v2.GrantAlreadyExists{}), nil
+
+	if !userHasExplicitRole {
+		defaultRole, err := r.client.GetDefaultRole(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get default role: %w", err)
+		}
+
+		if defaultRole != "" && defaultRole != roleID {
+			_, err := r.client.UpdateUserRole(ctx, userID, defaultRole)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to grant default role to user: %w", err)
+			}
+		}
 	}
 
 	annos, err = r.client.UpdateUserRole(ctx, userID, roleID)
 	if err != nil {
 		return nil, annos, fmt.Errorf("failed to update user role: %w", err)
+	}
+
+	if annos != nil {
+		return nil, annos, nil
 	}
 
 	grantObj := grant.NewGrant(
@@ -158,40 +167,14 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 	return []*v2.Grant{grantObj}, annos, nil
 }
 
-// Revoke removes a role from a user and assigns the default role.
-// The connector assumes that revoking a role means reverting the user to a default role.
+// Revoke removes a role from a user.
 func (r *roleBuilder) Revoke(ctx context.Context, g *v2.Grant) (annotations.Annotations, error) {
 	userID := g.Principal.Id.Resource
 	roleID := g.Entitlement.Resource.Id.Resource
 
-	defaultRole, err := r.client.GetDefaultRole(ctx)
+	annos, err := r.client.RemoveUserRole(ctx, userID, roleID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get default role: %w", err)
-	}
-
-	if roleID == defaultRole {
-		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
-	}
-
-	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
-	if err != nil {
-		return annos, fmt.Errorf("failed to get policy grants: %w", err)
-	}
-
-	var userRoles []string
-	for _, p := range policyGrants {
-		if p.Subject == userID {
-			userRoles = append(userRoles, p.Role)
-		}
-	}
-
-	if len(userRoles) == 1 && userRoles[0] == defaultRole {
-		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
-	}
-
-	annos, err = r.client.UpdateUserRole(ctx, userID, defaultRole)
-	if err != nil {
-		return annos, fmt.Errorf("failed to update user role: %w", err)
+		return annos, fmt.Errorf("failed to remove user role: %w", err)
 	}
 
 	return annos, nil

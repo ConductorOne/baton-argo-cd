@@ -144,7 +144,7 @@ jobs:
           ./baton-argo-cd $BATON_ARGS --file sync.c1z
 
           echo "Verifying grant..."
-          baton grants --entitlement="$ENTITLEMENT_ID" --file sync.c1z --output-format=json | jq -e --arg principal "$PRINCIPAL_ID" 'any((.grants // []); .principal.id.resource == $principal)'
+          baton grants --entitlement="$ENTITLEMENT_ID" --file sync.c1z --output-format=json | jq -e --arg principal "$PRINCIPAL_ID" 'any((.grants // [])[]; .principal.id.resource == $principal)'
 
           echo "Revoking grant..."
           ./baton-argo-cd $BATON_ARGS --revoke-grant "$GRANT_ID"
@@ -153,7 +153,7 @@ jobs:
           ./baton-argo-cd $BATON_ARGS --file sync.c1z
 
           echo "Verifying revoke..."
-          if baton grants --entitlement="$ENTITLEMENT_ID" --file sync.c1z --output-format=json | jq -e --arg principal "$PRINCIPAL_ID" 'any((.grants // []); .principal.id.resource == $principal)'; then
+          if baton grants --entitlement="$ENTITLEMENT_ID" --file sync.c1z --output-format=json | jq -e --arg principal "$PRINCIPAL_ID" 'any((.grants // [])[]; .principal.id.resource == $principal)'; then
             echo "Error: Grant was not revoked."
             exit 1
           else

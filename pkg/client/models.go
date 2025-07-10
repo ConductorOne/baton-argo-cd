@@ -29,16 +29,16 @@ type PolicyGrant struct {
 	Role    string
 }
 
-// GroupBinding represents a user/group to role binding from ArgoCD RBAC.
-type GroupBinding struct {
+// PolicyBinding represents a user/group to role binding from ArgoCD RBAC.
+type PolicyBinding struct {
 	Subject string
 	Role    string
 }
 
-// Policy represents a role-based access policy from ArgoCD RBAC.
-type Policy struct {
+// PolicyDefinition represents a role-based access policy from ArgoCD RBAC.
+type PolicyDefinition struct {
 	Role     string
 	Resource string
 	Action   string
-	Effect   string
+	Object   string
 }
