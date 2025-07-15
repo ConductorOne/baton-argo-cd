@@ -11,6 +11,8 @@ import (
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -132,9 +134,14 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
 	}
 
+	prefixedRoleID := roleID
+	if !strings.HasPrefix(roleID, RolePrefix) {
+		prefixedRoleID = RolePrefix + roleID
+	}
+
 	roleExists := false
 	for _, record := range records {
-		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
+		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID && record[2] == prefixedRoleID {
 			roleExists = true
 			break
 		}
@@ -144,7 +151,7 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 		return annotations.New(&v2.GrantAlreadyExists{}), nil
 	}
 
-	records = append(records, []string{userGrantPrefix, userID, roleID})
+	records = append(records, []string{userGrantPrefix, userID, prefixedRoleID})
 
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
@@ -209,9 +216,12 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 	var roleRemoved bool
 
 	for _, record := range records {
-		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID && record[2] == roleID {
-			roleRemoved = true
-			continue
+		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID {
+			policyRole := strings.TrimPrefix(record[2], RolePrefix)
+			if policyRole == roleID {
+				roleRemoved = true
+				break
+			}
 		}
 		newRecords = append(newRecords, record)
 	}
@@ -270,6 +280,25 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 		return nil, nil, fmt.Errorf("failed to update Secret: %w", err)
 	}
 
+	l := ctxzap.Extract(ctx)
+	defaultRole, err := c.GetDefaultRole(ctx)
+	if err != nil {
+		l.Warn("failed to get default role for new user",
+			zap.String("user", username),
+			zap.Error(err),
+		)
+	}
+
+	if defaultRole != "" {
+		if _, err := c.UpdateUserRole(ctx, username, defaultRole); err != nil {
+			l.Warn("failed to assign default role to new user",
+				zap.String("role", defaultRole),
+				zap.String("user", username),
+				zap.Error(err),
+			)
+		}
+	}
+
 	account := &Account{
 		Name:         username,
 		Enabled:      true,
@@ -280,34 +309,44 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 }
 
 // GetRoleUsers returns a list of users that have the given role.
-// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
+// Command: kubectl get cm argocd-rbac-cm ... | grep ...
 func (c *Client) GetRoleUsers(ctx context.Context, roleID string) ([]*Account, error) {
-	cm, err := getRBACConfigMap(ctx)
+	// Use grep to fetch only policy lines relevant to the role.
+	// It checks for the role with and without the "role:" prefix.
+	grepCmd := fmt.Sprintf("grep -E '^%s,[^,]+,(%s)?%s$'", PolicyTypeGrant, RolePrefix, roleID)
+	command := fmt.Sprintf("kubectl get cm %s -n %s -o jsonpath='{.data.policy\\.csv}' | %s",
+		RBACConfigMapName,
+		ArgocdNamespace,
+		grepCmd,
+	)
+
+	policyDataBytes, err := executeShellCommandWithOutput(ctx, command)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to execute command to get role users: %w", err)
 	}
 
-	policyData, ok := cm.Data[PolicyCSVKey]
-	if !ok {
+	if len(policyDataBytes) == 0 {
 		return nil, nil
 	}
 
-	reader := csv.NewReader(strings.NewReader(policyData))
-	reader.Comment = '#'
-	reader.TrimLeadingSpace = true
-	reader.FieldsPerRecord = -1
-
-	records, err := reader.ReadAll()
+	bindings, _, err := ParseArgoCDPolicyCSV(string(policyDataBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
+		return nil, fmt.Errorf("failed to parse filtered policy csv for role users: %w", err)
+	}
+
+	allAccounts, err := c.GetAccounts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all accounts for filtering: %w", err)
+	}
+	userMap := make(map[string]struct{})
+	for _, acc := range allAccounts {
+		userMap[acc.Name] = struct{}{}
 	}
 
 	var accounts []*Account
-	for _, record := range records {
-		if len(record) > 2 && record[0] == userGrantPrefix && record[2] == roleID {
-			accounts = append(accounts, &Account{
-				Name: record[1],
-			})
+	for _, binding := range bindings {
+		if _, isUser := userMap[binding.Subject]; isUser {
+			accounts = append(accounts, &Account{Name: binding.Subject})
 		}
 	}
 
@@ -315,51 +354,42 @@ func (c *Client) GetRoleUsers(ctx context.Context, roleID string) ([]*Account, e
 }
 
 // GetUserRoles returns a list of roles for a given user.
-// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
+// Command: kubectl get cm argocd-rbac-cm ... | grep ...
 func (c *Client) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
-	cm, err := getRBACConfigMap(ctx)
+	// Use grep to fetch only policy lines relevant to the user.
+	grepCmd := fmt.Sprintf("grep -E '^%s,%s,'", PolicyTypeGrant, userID)
+	command := fmt.Sprintf("kubectl get cm %s -n %s -o jsonpath='{.data.policy\\.csv}' | %s",
+		RBACConfigMapName,
+		ArgocdNamespace,
+		grepCmd,
+	)
+
+	policyDataBytes, err := executeShellCommandWithOutput(ctx, command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
+		return nil, fmt.Errorf("failed to execute command to get user roles: %w", err)
 	}
 
-	policyData, ok := cm.Data[PolicyCSVKey]
-	if !ok {
+	// If grep returns no results, the user has no explicit roles.
+	// In this case, they may have a default role.
+	if len(policyDataBytes) == 0 {
+		defaultRole, err := c.GetDefaultRole(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get default role: %w", err)
+		}
+		if defaultRole != "" {
+			return []string{defaultRole}, nil
+		}
 		return nil, nil
 	}
 
+	bindings, _, err := ParseArgoCDPolicyCSV(string(policyDataBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse filtered policy csv for user roles: %w", err)
+	}
+
 	var roles []string
-	reader := csv.NewReader(strings.NewReader(policyData))
-	reader.Comment = '#'
-	reader.TrimLeadingSpace = true
-	reader.FieldsPerRecord = -1
-
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
-	}
-
-	for _, record := range records {
-		if len(record) >= 3 && record[0] == userGrantPrefix && record[1] == userID {
-			role := strings.TrimPrefix(record[2], RolePrefix)
-			roles = append(roles, role)
-		}
-	}
-
-	defaultRole, err := c.GetDefaultRole(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get default role: %w", err)
-	}
-
-	isExplicitlyDefined := false
-	for _, record := range records {
-		if len(record) >= 2 && record[0] == userGrantPrefix && record[1] == userID {
-			isExplicitlyDefined = true
-			break
-		}
-	}
-
-	if !isExplicitlyDefined && defaultRole != "" {
-		roles = append(roles, defaultRole)
+	for _, binding := range bindings {
+		roles = append(roles, binding.Role)
 	}
 
 	return roles, nil

@@ -120,10 +120,6 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 		return nil, annos, fmt.Errorf("failed to update user role: %w", err)
 	}
 
-	if annos != nil {
-		return nil, annos, nil
-	}
-
 	grantObj := grant.NewGrant(
 		entitlement.Resource,
 		assignedEntitlement,

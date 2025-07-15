@@ -29,16 +29,15 @@ type PolicyGrant struct {
 	Role    string
 }
 
-// PolicyBinding represents a user/group to role binding from ArgoCD RBAC.
+// PolicyBinding represents a 'g' line in the policy, binding a subject to a role.
 type PolicyBinding struct {
 	Subject string
 	Role    string
 }
 
-// PolicyDefinition represents a role-based access policy from ArgoCD RBAC.
+// PolicyDefinition represents a 'p' line, defining a permission for a role.
 type PolicyDefinition struct {
 	Role     string
 	Resource string
 	Action   string
-	Object   string
 }
