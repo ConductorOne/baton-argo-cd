@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -20,6 +21,15 @@ const (
 
 	// Role and policy parsing constants.
 	RolePrefix = "role:"
+
+	// Shell command constants.
+	ShellExecutable = "sh"
+	ShellFlag       = "-c"
+
+	// PolicyTypeGrant indicates a role grant ('g') policy line.
+	PolicyTypeGrant = "g"
+	// PolicyTypeDefinition indicates a policy definition ('p') line.
+	PolicyTypeDefinition = "p"
 
 	// Kubectl command constants for interacting with Kubernetes.
 	Kubectl           = "kubectl"
@@ -69,7 +79,7 @@ func ParseArgoCDPolicyCSV(csvData string) ([]*PolicyBinding, []*PolicyDefinition
 		}
 
 		switch fields[0] {
-		case "g":
+		case PolicyTypeGrant:
 			if len(fields) >= 3 {
 				role := strings.TrimPrefix(fields[2], RolePrefix)
 				bindings = append(bindings, &PolicyBinding{
@@ -78,7 +88,7 @@ func ParseArgoCDPolicyCSV(csvData string) ([]*PolicyBinding, []*PolicyDefinition
 				})
 			}
 
-		case "p":
+		case PolicyTypeDefinition:
 			if len(fields) >= 4 {
 				role := strings.TrimPrefix(fields[1], RolePrefix)
 				policies = append(policies, &PolicyDefinition{
@@ -119,6 +129,25 @@ func executeCommandWithOutput(ctx context.Context, name string, args ...string) 
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%s command failed: %w, stderr: %s", name, err, stderr.String())
+	}
+
+	return stdout.Bytes(), nil
+}
+
+// executeShellCommandWithOutput executes a shell command string, which can include pipes.
+func executeShellCommandWithOutput(ctx context.Context, command string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, ShellExecutable, ShellFlag, command)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return stdout.Bytes(), nil
+		}
+		return nil, fmt.Errorf("shell command failed: %w, stderr: %s", err, stderr.String())
 	}
 
 	return stdout.Bytes(), nil
@@ -237,7 +266,7 @@ func getRoleNamesFromCSV(csvData string) (map[string]struct{}, error) {
 		}
 
 		switch fields[0] {
-		case "g":
+		case PolicyTypeGrant:
 			if len(fields) >= 3 {
 				role := strings.TrimPrefix(fields[2], RolePrefix)
 				if role != "" {
@@ -245,7 +274,7 @@ func getRoleNamesFromCSV(csvData string) (map[string]struct{}, error) {
 				}
 			}
 
-		case "p":
+		case PolicyTypeDefinition:
 			if len(fields) >= 4 {
 				role := strings.TrimPrefix(fields[1], RolePrefix)
 				if role != "" {
