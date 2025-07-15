@@ -88,38 +88,6 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 	return roles, annos, nil
 }
 
-// GetPolicyGrants fetches a list of grants from the ArgoCD RBAC config map.
-// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
-func (c *Client) GetPolicyGrants(ctx context.Context) ([]*PolicyGrant, annotations.Annotations, error) {
-	var annos annotations.Annotations
-	cm, err := getRBACConfigMap(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	policyData, ok := cm.Data[PolicyCSVKey]
-	if !ok || strings.TrimSpace(policyData) == "" {
-		return nil, nil, nil
-	}
-
-	var grants []*PolicyGrant
-
-	bindings, _, err := ParseArgoCDPolicyCSV(policyData)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse policy CSV: %w", err)
-	}
-
-	for _, binding := range bindings {
-		if binding.Subject != "" && binding.Role != "" {
-			grants = append(grants, &PolicyGrant{
-				Subject: binding.Subject,
-				Role:    binding.Role,
-			})
-		}
-	}
-	return grants, annos, nil
-}
-
 // GetDefaultRole fetches the default role from the ArgoCD RBAC config map.
 // Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
 func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
@@ -143,7 +111,7 @@ func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
 // It works by reading the existing `policy.csv`, checking if the user already has the role,
 // and if not, adding a new line for the new role assignment.
 // Command: kubectl patch configmap argocd-rbac-cm -n argocd --type=json -p '[{"op": "replace", "path": "/data/policy.csv", "value": "g, USER_ID, ROLE_ID"}]'.
-func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
@@ -215,7 +183,8 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID, roleID string) (ann
 }
 
 // RemoveUserRole removes a role from a user within the `argocd-rbac-cm` ConfigMap.
-func (c *Client) RemoveUserRole(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+// Command: kubectl patch configmap argocd-rbac-cm -n argocd --type=json -p '[{"op": "replace", "path": "/data/policy.csv", "value": "g, USER_ID, ROLE_ID"}]'.
+func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
@@ -310,36 +279,88 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 	return account, nil, nil
 }
 
-// GetSubjectsForRole fetches a list of subjects for a given role from the ArgoCD RBAC config map.
+// GetRoleUsers returns a list of users that have the given role.
 // Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
-func (c *Client) GetSubjectsForRole(ctx context.Context, roleName string) ([]string, error) {
+func (c *Client) GetRoleUsers(ctx context.Context, roleID string) ([]*Account, error) {
 	cm, err := getRBACConfigMap(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	policyData, ok := cm.Data[PolicyCSVKey]
-	if !ok || strings.TrimSpace(policyData) == "" {
+	if !ok {
 		return nil, nil
 	}
 
-	subjectMap := make(map[string]bool)
+	reader := csv.NewReader(strings.NewReader(policyData))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
 
-	bindings, _, err := ParseArgoCDPolicyCSV(policyData)
+	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse policy CSV: %w", err)
+		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
 	}
 
-	for _, binding := range bindings {
-		if binding.Role == roleName {
-			subjectMap[binding.Subject] = true
+	var accounts []*Account
+	for _, record := range records {
+		if len(record) > 2 && record[0] == userGrantPrefix && record[2] == roleID {
+			accounts = append(accounts, &Account{
+				Name: record[1],
+			})
 		}
 	}
 
-	var subjects []string
-	for subject := range subjectMap {
-		subjects = append(subjects, subject)
+	return accounts, nil
+}
+
+// GetUserRoles returns a list of roles for a given user.
+// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
+func (c *Client) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
+	cm, err := getRBACConfigMap(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
 	}
 
-	return subjects, nil
+	policyData, ok := cm.Data[PolicyCSVKey]
+	if !ok {
+		return nil, nil
+	}
+
+	var roles []string
+	reader := csv.NewReader(strings.NewReader(policyData))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
+	}
+
+	for _, record := range records {
+		if len(record) >= 3 && record[0] == userGrantPrefix && record[1] == userID {
+			role := strings.TrimPrefix(record[2], RolePrefix)
+			roles = append(roles, role)
+		}
+	}
+
+	defaultRole, err := c.GetDefaultRole(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default role: %w", err)
+	}
+
+	isExplicitlyDefined := false
+	for _, record := range records {
+		if len(record) >= 2 && record[0] == userGrantPrefix && record[1] == userID {
+			isExplicitlyDefined = true
+			break
+		}
+	}
+
+	if !isExplicitlyDefined && defaultRole != "" {
+		roles = append(roles, defaultRole)
+	}
+
+	return roles, nil
 }

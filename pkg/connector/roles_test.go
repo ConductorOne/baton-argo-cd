@@ -15,10 +15,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-const (
-	defaultRoleName = "default-role"
-)
-
 // TestRoleBuilder_List tests the List method of the RoleBuilder.
 func TestRoleBuilder_List(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
@@ -88,21 +84,9 @@ func TestRoleBuilder_Grants(t *testing.T) {
 			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "role1"},
 		}
 		mockCli := &test.MockClient{
-			GetAccountsFunc: func(ctx context.Context) ([]*client.Account, error) {
-				return []*client.Account{{Name: "user1"}}, nil
-			},
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{
-					{Subject: "user1", Role: "role1"},
-					{Subject: "user2", Role: "role2"},
-				}, nil, nil
-			},
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return "", nil
-			},
-			GetSubjectsForRoleFunc: func(ctx context.Context, roleName string) ([]string, error) {
-				if roleName == "role1" {
-					return []string{"user1"}, nil
+			GetRoleUsersFunc: func(ctx context.Context, roleID string) ([]*client.Account, error) {
+				if roleID == "role1" {
+					return []*client.Account{{Name: "user1"}}, nil
 				}
 				return nil, nil
 			},
@@ -115,21 +99,15 @@ func TestRoleBuilder_Grants(t *testing.T) {
 		assert.Equal(t, "user1", grants[0].Principal.Id.Resource)
 	})
 
-	t.Run("success for default role", func(t *testing.T) {
+	t.Run("success for user with multiple roles", func(t *testing.T) {
 		roleResource := &v2.Resource{
-			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: defaultRoleName},
+			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "role2"},
 		}
 		mockCli := &test.MockClient{
-			GetAccountsFunc: func(ctx context.Context) ([]*client.Account, error) {
-				return []*client.Account{{Name: "user1"}}, nil
-			},
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return nil, nil, nil
-			},
-			GetDefaultRoleFunc: func(ctx context.Context) (string, error) {
-				return defaultRoleName, nil
-			},
-			GetSubjectsForRoleFunc: func(ctx context.Context, roleName string) ([]string, error) {
+			GetRoleUsersFunc: func(ctx context.Context, roleID string) ([]*client.Account, error) {
+				if roleID == "role2" {
+					return []*client.Account{{Name: "user1"}}, nil
+				}
 				return nil, nil
 			},
 		}
@@ -146,8 +124,8 @@ func TestRoleBuilder_Grants(t *testing.T) {
 			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "some-role"},
 		}
 		mockCli := &test.MockClient{
-			GetAccountsFunc: func(ctx context.Context) ([]*client.Account, error) {
-				return nil, errors.New("get accounts error")
+			GetRoleUsersFunc: func(ctx context.Context, roleID string) ([]*client.Account, error) {
+				return nil, errors.New("get users error")
 			},
 		}
 
@@ -177,10 +155,7 @@ func TestRoleBuilder_Grant(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			GetPolicyGrantsFunc: func(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error) {
-				return []*client.PolicyGrant{{Subject: "test-user", Role: "old-role"}}, nil, nil
-			},
-			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+			UpdateUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 				assert.Equal(t, "test-user", userID)
 				assert.Equal(t, "new-role", roleID)
 				return nil, nil
@@ -205,7 +180,7 @@ func TestRoleBuilder_Grant(t *testing.T) {
 			},
 		}
 		mockCli := &test.MockClient{
-			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+			UpdateUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 				assert.Equal(t, "test-user", userID)
 				assert.Equal(t, "new-role", roleID)
 				return nil, nil
@@ -221,7 +196,7 @@ func TestRoleBuilder_Grant(t *testing.T) {
 
 	t.Run("update user role fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			UpdateUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+			UpdateUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 				return nil, errors.New("update error")
 			},
 		}
@@ -253,7 +228,7 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			RemoveUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 				assert.Equal(t, "test-user", userID)
 				assert.Equal(t, "role-to-revoke", roleID)
 				return nil, nil
@@ -267,7 +242,7 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 
 	t.Run("already revoked", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			RemoveUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 				return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 			},
 		}
@@ -280,7 +255,7 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 
 	t.Run("remove user role fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			RemoveUserRoleFunc: func(ctx context.Context, userID, roleID string) (annotations.Annotations, error) {
+			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
 				return nil, errors.New("remove error")
 			},
 		}
