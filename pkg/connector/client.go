@@ -12,8 +12,10 @@ import (
 type ArgoCdClient interface {
 	GetAccounts(ctx context.Context) ([]*client.Account, error)
 	GetRoles(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
-	GetPolicyGrants(ctx context.Context) ([]*client.PolicyGrant, annotations.Annotations, error)
 	GetDefaultRole(ctx context.Context) (string, error)
 	CreateAccount(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error)
-	GetSubjectsForRole(ctx context.Context, roleName string) ([]string, error)
+	UpdateUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
+	RemoveUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
+	GetUserRoles(ctx context.Context, userID string) ([]string, error)
+	GetRoleUsers(ctx context.Context, roleID string) ([]*client.Account, error)
 }

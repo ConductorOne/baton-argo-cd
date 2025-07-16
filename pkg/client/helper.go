@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -20,6 +21,15 @@ const (
 
 	// Role and policy parsing constants.
 	RolePrefix = "role:"
+
+	// Shell command constants.
+	ShellExecutable = "sh"
+	ShellFlag       = "-c"
+
+	// PolicyTypeGrant indicates a role grant ('g') policy line.
+	PolicyTypeGrant = "g"
+	// PolicyTypeDefinition indicates a policy definition ('p') line.
+	PolicyTypeDefinition = "p"
 
 	// Kubectl command constants for interacting with Kubernetes.
 	Kubectl           = "kubectl"
@@ -45,28 +55,21 @@ const (
 )
 
 // ParseArgoCDPolicyCSV parses ArgoCD policy CSV data into group bindings and policies.
-func ParseArgoCDPolicyCSV(data string) ([]GroupBinding, []Policy, error) {
-	var bindings []GroupBinding
-	var policies []Policy
-
-	reader := csv.NewReader(strings.NewReader(data))
-	reader.TrimLeadingSpace = true
+func ParseArgoCDPolicyCSV(csvData string) ([]*PolicyBinding, []*PolicyDefinition, error) {
+	reader := csv.NewReader(strings.NewReader(csvData))
 	reader.Comment = '#'
-	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
 	reader.FieldsPerRecord = -1
 
-	lineNum := 0
-	for {
-		fields, err := reader.Read()
-		lineNum++
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, nil, err
+	}
 
-		if err != nil {
-			if err.Error() == "EOF" {
-				break
-			}
-			continue
-		}
+	var bindings []*PolicyBinding
+	var policies []*PolicyDefinition
 
+	for _, fields := range records {
 		if len(fields) == 0 {
 			continue
 		}
@@ -76,28 +79,22 @@ func ParseArgoCDPolicyCSV(data string) ([]GroupBinding, []Policy, error) {
 		}
 
 		switch fields[0] {
-		case "g":
+		case PolicyTypeGrant:
 			if len(fields) >= 3 {
 				role := strings.TrimPrefix(fields[2], RolePrefix)
-				bindings = append(bindings, GroupBinding{
+				bindings = append(bindings, &PolicyBinding{
 					Subject: fields[1],
 					Role:    role,
 				})
 			}
 
-		case "p":
+		case PolicyTypeDefinition:
 			if len(fields) >= 4 {
 				role := strings.TrimPrefix(fields[1], RolePrefix)
-				effect := "allow"
-				if len(fields) >= 5 && fields[4] != "" {
-					effect = fields[4]
-				}
-
-				policies = append(policies, Policy{
+				policies = append(policies, &PolicyDefinition{
 					Role:     role,
 					Resource: fields[2],
 					Action:   fields[3],
-					Effect:   effect,
 				})
 			}
 		default:
@@ -132,6 +129,25 @@ func executeCommandWithOutput(ctx context.Context, name string, args ...string) 
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%s command failed: %w, stderr: %s", name, err, stderr.String())
+	}
+
+	return stdout.Bytes(), nil
+}
+
+// executeShellCommandWithOutput executes a shell command string, which can include pipes.
+func executeShellCommandWithOutput(ctx context.Context, command string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, ShellExecutable, ShellFlag, command)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return stdout.Bytes(), nil
+		}
+		return nil, fmt.Errorf("shell command failed: %w, stderr: %s", err, stderr.String())
 	}
 
 	return stdout.Bytes(), nil
@@ -227,25 +243,46 @@ func (c *Client) runKubectlCommand(ctx context.Context, args ...string) error {
 }
 
 // getRoleNamesFromCSV extracts all unique role names from the policy CSV data.
-func getRoleNamesFromCSV(policyData string) (map[string]struct{}, error) {
-	roleNames := make(map[string]struct{})
-	if strings.TrimSpace(policyData) == "" {
-		return roleNames, nil
-	}
+func getRoleNamesFromCSV(csvData string) (map[string]struct{}, error) {
+	reader := csv.NewReader(strings.NewReader(csvData))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
 
-	bindings, policies, err := ParseArgoCDPolicyCSV(policyData)
+	records, err := reader.ReadAll()
 	if err != nil {
 		return nil, err
 	}
 
-	for _, binding := range bindings {
-		if binding.Role != "" {
-			roleNames[binding.Role] = struct{}{}
+	roleNames := make(map[string]struct{})
+
+	for _, fields := range records {
+		if len(fields) == 0 {
+			continue
 		}
-	}
-	for _, policy := range policies {
-		if policy.Role != "" {
-			roleNames[policy.Role] = struct{}{}
+
+		for i := range fields {
+			fields[i] = strings.TrimSpace(fields[i])
+		}
+
+		switch fields[0] {
+		case PolicyTypeGrant:
+			if len(fields) >= 3 {
+				role := strings.TrimPrefix(fields[2], RolePrefix)
+				if role != "" {
+					roleNames[role] = struct{}{}
+				}
+			}
+
+		case PolicyTypeDefinition:
+			if len(fields) >= 4 {
+				role := strings.TrimPrefix(fields[1], RolePrefix)
+				if role != "" {
+					roleNames[role] = struct{}{}
+				}
+			}
+		default:
+			continue
 		}
 	}
 

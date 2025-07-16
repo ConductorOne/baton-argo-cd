@@ -8,7 +8,6 @@ import (
 	"github.com/conductorone/baton-argo-cd/pkg/client"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/crypto"
-	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
@@ -43,41 +42,6 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	)
 }
 
-// prepareAccountLookup creates a map for quick lookup of local account names.
-func prepareAccountLookup(accounts []*client.Account) map[string]bool {
-	lookup := make(map[string]bool)
-	for _, acc := range accounts {
-		lookup[acc.Name] = true
-	}
-	return lookup
-}
-
-// handleExplicitGrants processes policy grants for a specific role.
-func handleExplicitGrants(
-	roleResource *v2.Resource,
-	subjects []string,
-	accountsMap map[string]bool,
-) ([]*v2.Grant, error) {
-	var grants []*v2.Grant
-
-	for _, subject := range subjects {
-		if accountsMap[subject] {
-			grants = append(grants, createGrant(roleResource, subject))
-		}
-	}
-
-	return grants, nil
-}
-
-// createGrant is a helper function to create a grant.
-func createGrant(roleResource *v2.Resource, principalId string) *v2.Grant {
-	userResourceID := &v2.ResourceId{
-		ResourceType: userResourceType.Id,
-		Resource:     principalId,
-	}
-	return grant.NewGrant(roleResource, assignedEntitlement, userResourceID)
-}
-
 // generateCredentials generates a random password based on the credential options.
 func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error) {
 	if credentialOptions == nil || credentialOptions.GetRandomPassword() == nil {
@@ -98,28 +62,4 @@ func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error
 		return "", err
 	}
 	return password, nil
-}
-
-// handleDefaultRoleGrants assigns the default role to any user without an explicit grant.
-func handleDefaultRoleGrants(
-	roleResource *v2.Resource,
-	accountsMap map[string]bool,
-	policyGrants []*client.PolicyGrant,
-) ([]*v2.Grant, error) {
-	var grants []*v2.Grant
-	usersWithAnyExplicitGrant := make(map[string]bool)
-
-	for _, pg := range policyGrants {
-		if accountsMap[pg.Subject] {
-			usersWithAnyExplicitGrant[pg.Subject] = true
-		}
-	}
-
-	for accountName := range accountsMap {
-		if _, hasGrant := usersWithAnyExplicitGrant[accountName]; !hasGrant {
-			grants = append(grants, createGrant(roleResource, accountName))
-		}
-	}
-
-	return grants, nil
 }

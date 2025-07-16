@@ -101,7 +101,9 @@ func (u *userBuilder) CreateAccount(
 	}, []*v2.PlaintextData{passwordResult}, annos, nil
 }
 
-// extractUsername extracts the username from AccountInfo with proper fallback logic.
+// extractUsername safely retrieves the username from the AccountInfo protobuf message.
+// It prioritizes the `login` field and falls back to profile information,
+// ensuring that a valid, non-empty username is returned.
 func (u *userBuilder) extractUsername(accountInfo *v2.AccountInfo) (string, error) {
 	if login := accountInfo.GetLogin(); login != "" {
 		return strings.TrimSpace(login), nil

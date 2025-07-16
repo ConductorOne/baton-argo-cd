@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// TestValidateConfig tests the validation of the ArgoCD configuration.
 func TestValidateConfig(t *testing.T) {
 	tests := []struct {
 		name    string

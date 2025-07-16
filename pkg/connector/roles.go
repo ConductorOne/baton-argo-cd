@@ -8,7 +8,10 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/conductorone/baton-sdk/pkg/types/entitlement"
+	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 )
 
 const assignedEntitlement = "assigned"
@@ -70,42 +73,73 @@ func (r *roleBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _
 
 // Grants returns the grants for a role.
 func (r *roleBuilder) Grants(ctx context.Context, roleResource *v2.Resource, _ *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
 	roleName := roleResource.Id.Resource
 
-	accounts, err := r.client.GetAccounts(ctx)
+	users, err := r.client.GetRoleUsers(ctx, roleName)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("failed to get users for role: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to get users for role %s: %w", roleName, err)
 	}
 
-	policyGrants, annos, err := r.client.GetPolicyGrants(ctx)
-	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to get policy grants: %w", err)
-	}
-
-	accountsMap := prepareAccountLookup(accounts)
-
-	subjects, err := r.client.GetSubjectsForRole(ctx, roleName)
-	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to get subjects for role %s: %w", roleName, err)
-	}
-
-	explicitGrants, err := handleExplicitGrants(roleResource, subjects, accountsMap)
-	if err != nil {
-		return nil, "", annos, fmt.Errorf("failed to handle explicit grants: %w", err)
-	}
-
-	allGrants := explicitGrants
-
-	defaultRole, err := r.client.GetDefaultRole(ctx)
-	if err == nil && defaultRole == roleName {
-		defaultRoleGrants, err := handleDefaultRoleGrants(roleResource, accountsMap, policyGrants)
+	var allGrants []*v2.Grant
+	var annos annotations.Annotations
+	for _, user := range users {
+		userResource, err := resource.NewUserResource(
+			user.Name,
+			userResourceType,
+			user.Name,
+			nil,
+		)
 		if err != nil {
-			return nil, "", annos, fmt.Errorf("failed to handle default role grants: %w", err)
+			l.Warn("failed to create user resource",
+				zap.String("user", user.Name),
+				zap.Error(err),
+			)
+			continue
 		}
-		allGrants = append(allGrants, defaultRoleGrants...)
+
+		grant := grant.NewGrant(
+			roleResource,
+			assignedEntitlement,
+			userResource.Id,
+		)
+		allGrants = append(allGrants, grant)
 	}
 
 	return allGrants, "", annos, nil
+}
+
+// Grant assigns a role to a user, adding it to any existing roles.
+// If the user only has a default role, it will be made explicit.
+func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) ([]*v2.Grant, annotations.Annotations, error) {
+	userID := principal.Id.Resource
+	roleID := entitlement.Resource.Id.Resource
+
+	annos, err := r.client.UpdateUserRole(ctx, userID, roleID)
+	if err != nil {
+		return nil, annos, fmt.Errorf("failed to update user role: %w", err)
+	}
+
+	grantObj := grant.NewGrant(
+		entitlement.Resource,
+		assignedEntitlement,
+		principal.Id,
+	)
+
+	return []*v2.Grant{grantObj}, annos, nil
+}
+
+// Revoke removes a role from a user.
+func (r *roleBuilder) Revoke(ctx context.Context, g *v2.Grant) (annotations.Annotations, error) {
+	userID := g.Principal.Id.Resource
+	roleID := g.Entitlement.Resource.Id.Resource
+
+	annos, err := r.client.RemoveUserRole(ctx, userID, roleID)
+	if err != nil {
+		return annos, fmt.Errorf("failed to remove user role: %w", err)
+	}
+
+	return annos, nil
 }
 
 // newRoleBuilder creates a new roleBuilder.
