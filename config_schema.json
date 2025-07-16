@@ -1,8 +1,15 @@
 {
   "fields": [
     {
-      "name": "configField",
-      "stringField": {}
+      "name": "api-url",
+      "displayName": "API URL",
+      "description": "API URL for Argo CD.",
+      "isRequired": true,
+      "stringField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     },
     {
       "name": "log-level",
@@ -47,7 +54,41 @@
       "description": "Disable OpenTelemetry tracing",
       "isOps": true,
       "boolField": {}
+    },
+    {
+      "name": "password",
+      "displayName": "Password",
+      "description": "Password for authenticating with Argo CD CLI.",
+      "isRequired": true,
+      "isSecret": true,
+      "stringField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
+    },
+    {
+      "name": "username",
+      "displayName": "Username",
+      "description": "Username for authenticating with Argo CD CLI.",
+      "isRequired": true,
+      "stringField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     }
   ],
-  "displayName": "Argo Cd"
+  "constraints": [
+    {
+      "kind": "CONSTRAINT_KIND_REQUIRED_TOGETHER",
+      "fieldNames": [
+        "username",
+        "password"
+      ]
+    }
+  ],
+  "displayName": "Argo CD",
+  "helpUrl": "/docs/baton/argo-cd",
+  "iconUrl": "/static/app-icons/argo-cd.svg"
 }
