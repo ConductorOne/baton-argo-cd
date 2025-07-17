@@ -17,12 +17,14 @@ import (
 type MockClient struct {
 	GetAccountsFunc            func(ctx context.Context) ([]*client.Account, error)
 	GetRolesFunc               func(ctx context.Context) ([]*client.Role, annotations.Annotations, error)
+	GetGroupsFunc              func(ctx context.Context) ([]*client.Group, error)
 	GetDefaultRoleFunc         func(ctx context.Context) (string, error)
 	CreateAccountFunc          func(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error)
 	UpdateUserRoleFunc         func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
 	RemoveUserRoleFunc         func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
 	GetSubjectsForAllRolesFunc func(ctx context.Context) (map[string][]string, error)
 	GetUserRolesFunc           func(ctx context.Context, userID string) ([]string, error)
+	GetRoleSubjectsFunc        func(ctx context.Context, roleID string) ([]string, error)
 	GetRoleUsersFunc           func(ctx context.Context, roleID string) ([]*client.Account, error)
 }
 
@@ -30,6 +32,15 @@ type MockClient struct {
 func (m *MockClient) GetAccounts(ctx context.Context) ([]*client.Account, error) {
 	if m.GetAccountsFunc != nil {
 		return m.GetAccountsFunc(ctx)
+	}
+	return nil, nil
+}
+
+// GetGroups calls the mock method if it is defined.
+
+func (m *MockClient) GetGroups(ctx context.Context) ([]*client.Group, error) {
+	if m.GetGroupsFunc != nil {
+		return m.GetGroupsFunc(ctx)
 	}
 	return nil, nil
 }
@@ -78,6 +89,14 @@ func (m *MockClient) RemoveUserRole(ctx context.Context, userID string, roleID s
 func (m *MockClient) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
 	if m.GetUserRolesFunc != nil {
 		return m.GetUserRolesFunc(ctx, userID)
+	}
+	return nil, nil
+}
+
+// GetRoleSubjects calls the mock method if it is defined.
+func (m *MockClient) GetRoleSubjects(ctx context.Context, roleID string) ([]string, error) {
+	if m.GetRoleSubjectsFunc != nil {
+		return m.GetRoleSubjectsFunc(ctx, roleID)
 	}
 	return nil, nil
 }

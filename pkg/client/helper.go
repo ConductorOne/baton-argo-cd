@@ -288,3 +288,56 @@ func getRoleNamesFromCSV(csvData string) (map[string]struct{}, error) {
 
 	return roleNames, nil
 }
+
+// updateRBACPolicy updates the policy.csv field in the argocd-rbac-cm ConfigMap.
+// It takes the full set of policy records and applies them using a kubectl patch command.
+// Command: kubectl patch configmap argocd-rbac-cm --type=json -p '[{"op": "replace", ...}]'.
+func (c *Client) updateRBACPolicy(ctx context.Context, records [][]string, policyExists bool) error {
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+	if err := writer.WriteAll(records); err != nil {
+		return fmt.Errorf("failed to write policy csv: %w", err)
+	}
+
+	updatedPolicyCsv := buf.String()
+
+	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
+	if err != nil {
+		return fmt.Errorf("failed to marshal policy csv for patch: %w", err)
+	}
+
+	var patch string
+	if policyExists {
+		patch = fmt.Sprintf(`[{"op": "replace", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
+	} else {
+		patch = fmt.Sprintf(`[{"op": "add", "path": "/data/%s", "value": %s}]`, PolicyCSVKey, string(marshaledCsv))
+	}
+
+	if err := c.runKubectlCommand(
+		ctx,
+		"patch",
+		"configmap",
+		RBACConfigMapName,
+		NamespaceFlag,
+		ArgocdNamespace,
+		"--type=json",
+		fmt.Sprintf("-p=%s", patch),
+	); err != nil {
+		return fmt.Errorf("failed to patch rbac configmap: %w", err)
+	}
+
+	return nil
+}
+
+// getFilteredPolicyCSV executes a grep command on the policy.csv from the rbac configmap.
+// It constructs and executes a shell command to filter the policy data.
+// Command: kubectl get cm argocd-rbac-cm ... | grep ...
+func getFilteredPolicyCSV(ctx context.Context, grepCmd string) ([]byte, error) {
+	command := fmt.Sprintf("kubectl get cm %s -n %s -o jsonpath='{.data.policy\\.csv}' | %s",
+		RBACConfigMapName,
+		ArgocdNamespace,
+		grepCmd,
+	)
+
+	return executeShellCommandWithOutput(ctx, command)
+}
