@@ -79,60 +79,45 @@ func TestRoleBuilder_Entitlements(t *testing.T) {
 
 // TestRoleBuilder_Grants tests the Grants method of the RoleBuilder.
 func TestRoleBuilder_Grants(t *testing.T) {
-	t.Run("success for role with explicit grants", func(t *testing.T) {
+	t.Run("success for role with local user and group grants", func(t *testing.T) {
 		roleResource := &v2.Resource{
 			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "role1"},
 		}
 		mockCli := &test.MockClient{
-			GetRoleUsersFunc: func(ctx context.Context, roleID string) ([]*client.Account, error) {
+			GetAccountsFunc: func(ctx context.Context) ([]*client.Account, error) {
+				return []*client.Account{{Name: "user1"}}, nil
+			},
+			GetRoleSubjectsFunc: func(ctx context.Context, roleID string) ([]string, error) {
 				if roleID == "role1" {
-					return []*client.Account{{Name: "user1"}}, nil
+					return []string{"user1", "group1"}, nil
 				}
 				return nil, nil
+			},
+			GetGroupsFunc: func(ctx context.Context) ([]*client.Group, error) {
+				return []*client.Group{{Name: "group1"}}, nil
 			},
 		}
 
 		builder := newRoleBuilder(mockCli)
 		grants, _, _, err := builder.Grants(context.Background(), roleResource, &pagination.Token{})
 		require.NoError(t, err)
-		assert.Len(t, grants, 1)
-		assert.Equal(t, "user1", grants[0].Principal.Id.Resource)
+		assert.Len(t, grants, 2)
 	})
 
-	t.Run("success for user with multiple roles", func(t *testing.T) {
-		roleResource := &v2.Resource{
-			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "role2"},
-		}
-		mockCli := &test.MockClient{
-			GetRoleUsersFunc: func(ctx context.Context, roleID string) ([]*client.Account, error) {
-				if roleID == "role2" {
-					return []*client.Account{{Name: "user1"}}, nil
-				}
-				return nil, nil
-			},
-		}
-
-		builder := newRoleBuilder(mockCli)
-		grants, _, _, err := builder.Grants(context.Background(), roleResource, &pagination.Token{})
-		require.NoError(t, err)
-		assert.Len(t, grants, 1)
-		assert.Equal(t, "user1", grants[0].Principal.Id.Resource)
-	})
-
-	t.Run("error getting all user data", func(t *testing.T) {
+	t.Run("error getting role subjects", func(t *testing.T) {
 		roleResource := &v2.Resource{
 			Id: &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "some-role"},
 		}
 		mockCli := &test.MockClient{
-			GetRoleUsersFunc: func(ctx context.Context, roleID string) ([]*client.Account, error) {
-				return nil, errors.New("get users error")
+			GetRoleSubjectsFunc: func(ctx context.Context, roleID string) ([]string, error) {
+				return nil, errors.New("get subjects error")
 			},
 		}
 
 		builder := newRoleBuilder(mockCli)
 		_, _, _, err := builder.Grants(context.Background(), roleResource, &pagination.Token{})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get users for role")
+		assert.Contains(t, err.Error(), "failed to get subjects for role")
 	})
 }
 
