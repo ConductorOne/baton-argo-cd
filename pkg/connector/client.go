@@ -17,5 +17,5 @@ type ArgoCdClient interface {
 	UpdateUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
 	RemoveUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
 	GetUserRoles(ctx context.Context, userID string) ([]string, error)
-	GetRoleUsers(ctx context.Context, roleID string) ([]*client.Account, error)
+	GetRoleSubjects(ctx context.Context, roleName string) ([]string, error)
 }

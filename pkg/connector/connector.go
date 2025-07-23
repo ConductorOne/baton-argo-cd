@@ -15,10 +15,10 @@ type Connector struct {
 }
 
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
-func (a *Connector) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
+func (c *Connector) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
 	return []connectorbuilder.ResourceSyncer{
-		newUserBuilder(a.client),
-		newRoleBuilder(a.client),
+		newUserBuilder(c.client),
+		newRoleBuilder(c.client),
 	}
 }
 

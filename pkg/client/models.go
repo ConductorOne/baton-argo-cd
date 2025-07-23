@@ -41,3 +41,14 @@ type PolicyDefinition struct {
 	Resource string
 	Action   string
 }
+
+// Group represents a group from the ArgoCD RBAC config map.
+type Group struct {
+	Name string
+}
+
+// GroupBinding represents a 'g' line in the policy, binding a group to a role.
+type GroupBinding struct {
+	Group string
+	Role  string
+}
