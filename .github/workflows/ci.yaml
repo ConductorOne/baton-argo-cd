@@ -2,6 +2,10 @@ name: ci
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize]
+  push:
+    branches:
+      - main
 
 jobs:
   go-lint:
@@ -10,11 +14,11 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.23.x
+          go-version-file: go.mod
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Run linters
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
           version: latest
           args: --timeout=3m
@@ -22,7 +26,6 @@ jobs:
   go-test:
     strategy:
       matrix:
-        go-version: [1.23.x]
         platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
     env:
@@ -33,7 +36,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: go.mod
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Run go tests
@@ -58,7 +61,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.23.x
+          go-version-file: go.mod
 
       - name: Checkout code
         uses: actions/checkout@v4
