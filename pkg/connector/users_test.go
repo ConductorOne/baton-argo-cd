@@ -111,13 +111,10 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 		accountInfo := &v2.AccountInfo{
 			Login: "test-user",
 		}
-		credentialOptions := &v2.CredentialOptions{
-			Options: &v2.CredentialOptions_RandomPassword_{
-				RandomPassword: &v2.CredentialOptions_RandomPassword{
-					Length: 16,
-				},
-			},
-		}
+		credentialOptions := &v2.LocalCredentialOptions{}
+		credentialOptions.SetRandomPassword(&v2.LocalCredentialOptions_RandomPassword{
+			Length: 16,
+		})
 
 		resp, plaintextData, _, err := builder.CreateAccount(context.Background(), accountInfo, credentialOptions)
 		require.NoError(t, err)
@@ -134,13 +131,10 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 				"email": "test@example.com",
 			}),
 		}
-		credentialOptions := &v2.CredentialOptions{
-			Options: &v2.CredentialOptions_RandomPassword_{
-				RandomPassword: &v2.CredentialOptions_RandomPassword{
-					Length: 16,
-				},
-			},
-		}
+		credentialOptions := &v2.LocalCredentialOptions{}
+		credentialOptions.SetRandomPassword(&v2.LocalCredentialOptions_RandomPassword{
+			Length: 16,
+		})
 
 		_, _, _, err := builder.CreateAccount(context.Background(), accountInfo, credentialOptions)
 		require.Error(t, err)
@@ -158,13 +152,10 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 		accountInfo := &v2.AccountInfo{
 			Login: "test-user",
 		}
-		credentialOptions := &v2.CredentialOptions{
-			Options: &v2.CredentialOptions_RandomPassword_{
-				RandomPassword: &v2.CredentialOptions_RandomPassword{
-					Length: 16,
-				},
-			},
-		}
+		credentialOptions := &v2.LocalCredentialOptions{}
+		credentialOptions.SetRandomPassword(&v2.LocalCredentialOptions_RandomPassword{
+			Length: 16,
+		})
 
 		_, _, _, err := builder.CreateAccount(context.Background(), accountInfo, credentialOptions)
 		require.Error(t, err)
