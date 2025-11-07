@@ -54,7 +54,7 @@ func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error
 	}
 
 	password, err := crypto.GenerateRandomPassword(
-		&v2.CredentialOptions_RandomPassword{
+		&v2.LocalCredentialOptions_RandomPassword{
 			Length: length,
 		},
 	)
