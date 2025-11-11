@@ -47,6 +47,7 @@ func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 			[]resource.RoleTraitOption{resource.WithRoleProfile(profile)},
 		)
 		if err != nil {
+			// TODO: wrap error with grpc code
 			return nil, "", annos, err
 		}
 		resources = append(resources, roleResource)

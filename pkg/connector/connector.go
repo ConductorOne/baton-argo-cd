@@ -2,9 +2,11 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
+	cfg "github.com/conductorone/baton-argo-cd/pkg/config"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
@@ -57,9 +59,11 @@ func (d *Connector) Validate(ctx context.Context) (annotations.Annotations, erro
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, apiUrl string, username string, password string) (*Connector, error) {
-	cli := client.NewClient(ctx, apiUrl, username, password)
-
+func New(ctx context.Context, config *cfg.ArgoCd) (*Connector, error) {
+	cli, err := client.NewClient(ctx, config.ApiUrl, config.Username, config.Password, config.Kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Argo CD client: %w", err)
+	}
 	return &Connector{
 		client: cli,
 	}, nil

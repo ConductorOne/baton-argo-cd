@@ -7,9 +7,10 @@ type ArgoCd struct {
 	Username string `mapstructure:"username"`
 	Password string `mapstructure:"password"`
 	ApiUrl string `mapstructure:"api-url"`
+	Kubeconfig []byte `mapstructure:"kubeconfig"`
 }
 
-func (c* ArgoCd) findFieldByTag(tagValue string) (any, bool) {
+func (c *ArgoCd) findFieldByTag(tagValue string) (any, bool) {
 	v := reflect.ValueOf(c).Elem() // Dereference pointer to struct
 	t := v.Type()
 
@@ -41,11 +42,13 @@ func (c *ArgoCd) GetString(fieldName string) string {
 	if !ok {
 		return ""
 	}
-	t, ok := v.(string)
-	if !ok {
-		panic("wrong type")
+	if t, ok := v.(string); ok {
+		return t
 	}
-	return t
+	if t, ok := v.([]byte); ok {
+		return string(t)
+	}
+	panic("wrong type")
 }
 
 func (c *ArgoCd) GetInt(fieldName string) int {

@@ -25,7 +25,7 @@ func main() {
 	_, cmd, err := config.DefineConfiguration(
 		ctx,
 		"baton-argo-cd",
-		getConnector[*cfg.ArgoCd],
+		getConnector,
 		cfg.Config,
 	)
 	if err != nil {
@@ -42,17 +42,13 @@ func main() {
 	}
 }
 
-// TODO: After the config has been generated, update this function to use the config.
-func getConnector[T field.Configurable](ctx context.Context, config T) (types.ConnectorServer, error) {
+func getConnector(ctx context.Context, config *cfg.ArgoCd) (types.ConnectorServer, error) {
 	l := ctxzap.Extract(ctx)
 	if err := field.Validate(cfg.Config, config); err != nil {
 		return nil, err
 	}
 
-	username := config.GetString(cfg.UsernameField.FieldName)
-	password := config.GetString(cfg.PasswordField.FieldName)
-	apiUrl := config.GetString(cfg.ApiUrlField.FieldName)
-	cb, err := connector.New(ctx, apiUrl, username, password)
+	cb, err := connector.New(ctx, config)
 	if err != nil {
 		return nil, err
 	}
