@@ -20,6 +20,12 @@
       }
     },
     {
+      "name": "log-level-debug-expires-at",
+      "description": "The timestamp indicating when debug-level logging should expire",
+      "isOps": true,
+      "stringField": {}
+    },
+    {
       "name": "otel-collector-endpoint",
       "description": "The endpoint of the OpenTelemetry collector to send observability data to (used for both tracing and logging if specific endpoints are not provided)",
       "isOps": true,
@@ -65,6 +71,14 @@
         "rules": {
           "isRequired": true
         }
+      }
+    },
+    {
+      "name": "session-store-maximum-size",
+      "description": "The maximum size of the local in-memory session store cache in bytes.",
+      "isOps": true,
+      "intField": {
+        "defaultValue": "15728640"
       }
     },
     {
