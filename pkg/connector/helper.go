@@ -43,18 +43,19 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 }
 
 // generateCredentials generates a random password based on the credential options.
-func generateCredentials(credentialOptions *v2.CredentialOptions) (string, error) {
+func generateCredentials(credentialOptions *v2.LocalCredentialOptions) (string, error) {
 	if credentialOptions == nil || credentialOptions.GetRandomPassword() == nil {
 		return "", errors.New("unsupported credential option: only random password is supported")
 	}
 
-	length := credentialOptions.GetRandomPassword().GetLength()
+	randomPassword := credentialOptions.GetRandomPassword()
+	length := randomPassword.GetLength()
 	if length < PasswordMinLength {
 		length = PasswordMinLength
 	}
 
 	password, err := crypto.GenerateRandomPassword(
-		&v2.CredentialOptions_RandomPassword{
+		&v2.LocalCredentialOptions_RandomPassword{
 			Length: length,
 		},
 	)
