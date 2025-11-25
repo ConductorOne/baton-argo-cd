@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -53,7 +55,6 @@ const (
 	updateUserPasswordURL = "/api/v1/account/password" //nolint:gosec // updateUserPasswordURL is an API path, no hardcoded credentials.
 	getAccountsURL        = "/api/v1/account"
 	sessionURL            = "/api/v1/session"
-	sessionVerifyURL      = "/api/v1/session/verify"
 )
 
 // buildURL constructs a proper URL by joining the base URL with the path.
@@ -72,6 +73,33 @@ func (c *Client) buildURL(path string) (string, error) {
 	return baseURL.ResolveReference(pathURL).String(), nil
 }
 
+// authRoundTripper is a custom RoundTripper that ensures authentication before each request.
+type authRoundTripper struct {
+	base   http.RoundTripper
+	client *Client
+}
+
+// RoundTrip implements http.RoundTripper interface.
+// It ensures authentication before making the request and adds auth headers.
+func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Skip authentication for session endpoints to avoid infinite recursion
+	reqURL := req.URL.Path
+	if reqURL == sessionURL || strings.HasSuffix(reqURL, sessionURL) {
+		return rt.base.RoundTrip(req)
+	}
+
+	// Ensure authentication before the request
+	if err := rt.client.ensureAuthenticated(req.Context()); err != nil {
+		return nil, fmt.Errorf("failed to ensure authentication: %w", err)
+	}
+
+	// Add auth headers to the request
+	rt.client.setAuthHeader(req)
+
+	// Execute the request using the base transport
+	return rt.base.RoundTrip(req)
+}
+
 // Client provides methods to interact with Argo CD via its REST API.
 type Client struct {
 	apiUrl         string
@@ -80,6 +108,7 @@ type Client struct {
 	kubeconfigFile []byte
 	httpClient     *http.Client
 	sessionToken   string
+	tokenExpiry    time.Time
 	k8sClient      kubernetes.Interface
 }
 
@@ -103,11 +132,14 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 	uhttpOpts := []uhttp.Option{
 		uhttp.WithLogger(true, ctxzap.Extract(ctx)),
 	}
+	// Apply TLS config to uhttp if we have one
+	if transport.TLSClientConfig != nil {
+		uhttpOpts = append(uhttpOpts, uhttp.WithTLSClientConfig(transport.TLSClientConfig))
+	}
 	httpClient, err := uhttp.NewClient(ctx, uhttpOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create uhttp client: %w", err)
 	}
-	httpClient.Transport = transport
 	httpClient.Timeout = 30 * time.Second
 
 	// Initialize Kubernetes client
@@ -116,14 +148,25 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 		return nil, fmt.Errorf("failed to initialize Kubernetes client: %w", err)
 	}
 
-	return &Client{
+	// Create client instance first (needed for roundtripper)
+	client := &Client{
 		apiUrl:         finalBaseUrl,
 		username:       username,
 		password:       password,
 		kubeconfigFile: kubeconfigFile,
 		httpClient:     httpClient,
 		k8sClient:      k8sClient,
-	}, nil
+	}
+
+	// Wrap the uhttp transport with authentication roundtripper
+	// This preserves uhttp's logging and other features while adding authentication
+	authRT := &authRoundTripper{
+		base:   httpClient.Transport,
+		client: client,
+	}
+	httpClient.Transport = authRT
+
+	return client, nil
 }
 
 func getUhttpClient(ctx context.Context, config *rest.Config) (*http.Client, error) {
@@ -218,17 +261,31 @@ func initKubernetesClient(ctx context.Context, kubeconfigFile []byte) (kubernete
 
 // ensureAuthenticated ensures the client is authenticated with ArgoCD API.
 // It authenticates using the /api/v1/session endpoint and stores the session token.
+// It checks token expiration and refreshes if needed (2 minutes before expiry).
 func (c *Client) ensureAuthenticated(ctx context.Context) error {
 	l := ctxzap.Extract(ctx)
 
-	// If we already have a session token, try to verify it
+	// If we already have a session token, check if it's still valid based on expiration
 	if c.sessionToken != "" {
-		if err := c.verifySession(ctx); err == nil {
-			l.Debug("ArgoCD API session token still valid")
-			return nil
-		} else {
-			l.Debug("ArgoCD API session token expired or invalid", zap.Error(err))
+		// Refresh token if it expires within 2 minutes
+		refreshThreshold := 2 * time.Minute
+		now := time.Now()
+
+		// If token expiry is zero (not set), we can't determine validity, so re-authenticate
+		switch {
+		case c.tokenExpiry.IsZero():
+			l.Debug("ArgoCD API session token expiry not set, re-authenticating")
 			c.sessionToken = ""
+			c.tokenExpiry = time.Time{}
+		case now.Add(refreshThreshold).Before(c.tokenExpiry):
+			// Token is still valid (expires more than 2 minutes from now)
+			l.Debug("ArgoCD API session token still valid", zap.Time("expires_at", c.tokenExpiry))
+			return nil
+		default:
+			// Token is about to expire or has expired, clear it to force re-authentication
+			l.Debug("ArgoCD API session token expired or expiring soon", zap.Time("expires_at", c.tokenExpiry), zap.Time("now", now))
+			c.sessionToken = ""
+			c.tokenExpiry = time.Time{}
 		}
 	}
 
@@ -267,16 +324,6 @@ func (c *Client) ensureAuthenticated(ctx context.Context) error {
 		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Extract session token from Set-Cookie header
-	// ArgoCD typically sets a cookie named "argocd.token"
-	for _, cookie := range resp.Cookies() {
-		if cookie.Name == "argocd.token" {
-			c.sessionToken = cookie.Value
-			l.Debug("Successfully authenticated with ArgoCD API")
-			return nil
-		}
-	}
-
 	// If no cookie found, try to read token from response body
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -286,51 +333,65 @@ func (c *Client) ensureAuthenticated(ctx context.Context) error {
 	var sessionResp struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal(bodyBytes, &sessionResp); err == nil && sessionResp.Token != "" {
-		c.sessionToken = sessionResp.Token
-		l.Debug("Successfully authenticated with ArgoCD API")
-		return nil
+
+	if err := json.Unmarshal(bodyBytes, &sessionResp); err != nil {
+		return fmt.Errorf("failed to parse session response: %w", err)
 	}
 
-	return fmt.Errorf("failed to extract session token from response")
+	if sessionResp.Token == "" {
+		return fmt.Errorf("session token not found in response")
+	}
+
+	c.sessionToken = sessionResp.Token
+
+	// Extract expiration from JWT token
+	// ArgoCD tokens are JWTs, so we can decode them to get the expiration
+	tokenExpiry, err := extractExpirationFromJWT(sessionResp.Token)
+	if err != nil {
+		l.Debug("Failed to extract expiration from JWT, using default 24 hours", zap.Error(err))
+		// Fallback to 24 hours if we can't parse the token
+		c.tokenExpiry = time.Now().Add(24 * time.Hour)
+	} else {
+		c.tokenExpiry = tokenExpiry
+	}
+
+	l.Debug("Successfully authenticated with ArgoCD API", zap.Time("expires_at", c.tokenExpiry))
+	return nil
 }
 
-// verifySession verifies that the current session token is still valid.
-func (c *Client) verifySession(ctx context.Context) error {
-	verifyURL, err := c.buildURL(sessionVerifyURL)
+// extractExpirationFromJWT extracts the expiration time from a JWT token.
+// It decodes the JWT payload and reads the 'exp' claim.
+func extractExpirationFromJWT(tokenString string) (time.Time, error) {
+	// Parse the JWT without verification (we only need to read the expiration)
+	// JWTs are in the format: header.payload.signature
+	parts := strings.Split(tokenString, ".")
+	if len(parts) != 3 {
+		return time.Time{}, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
+	}
+
+	// Decode the payload (second part)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return fmt.Errorf("failed to build session verify URL: %w", err)
+		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, verifyURL, nil)
-	if err != nil {
-		return err
+	// Parse the payload JSON
+	var claims struct {
+		Exp *jwt.NumericDate `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, fmt.Errorf("failed to unmarshal JWT claims: %w", err)
 	}
 
-	c.setAuthHeader(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
+	if claims.Exp == nil {
+		return time.Time{}, fmt.Errorf("JWT does not contain 'exp' claim")
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("session verification failed with status %d", resp.StatusCode)
-	}
-
-	return nil
+	return time.Parse(time.RFC3339, string(claims.Exp.UTC().AppendFormat([]byte{}, "2006-01-02T15:04:05Z07:00")))
 }
 
 // setAuthHeader sets the authentication header for the request.
 func (c *Client) setAuthHeader(req *http.Request) {
 	if c.sessionToken != "" {
-		// ArgoCD API can use either cookie or Authorization header
-		req.AddCookie(&http.Cookie{
-			Name:  "argocd.token",
-			Value: c.sessionToken,
-		})
-		// Also try Authorization header as fallback
 		req.Header.Set("Authorization", "Bearer "+c.sessionToken)
 	}
 }
@@ -338,10 +399,6 @@ func (c *Client) setAuthHeader(req *http.Request) {
 // GetAccounts fetches a list of accounts from ArgoCD using the API.
 // Endpoint: GET /api/v1/account.
 func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
-	if err := c.ensureAuthenticated(ctx); err != nil {
-		return nil, fmt.Errorf("failed to ensure authentication: %w", err)
-	}
-
 	accountsURL, err := c.buildURL(getAccountsURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build accounts URL: %w", err)
@@ -352,7 +409,6 @@ func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
 		return nil, fmt.Errorf("failed to create accounts request: %w", err)
 	}
 
-	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -581,10 +637,6 @@ type UpdateUserPasswordRequest struct {
 // UpdateUserPassword updates a user's password using the ArgoCD API.
 // Endpoint: PUT /api/v1/account/password.
 func (c *Client) UpdateUserPassword(ctx context.Context, username string, password string) error {
-	if err := c.ensureAuthenticated(ctx); err != nil {
-		return fmt.Errorf("failed to ensure authentication: %w", err)
-	}
-
 	updatePasswordURL, err := c.buildURL(updateUserPasswordURL)
 	if err != nil {
 		return fmt.Errorf("failed to build password update URL: %w", err)
@@ -607,7 +659,6 @@ func (c *Client) UpdateUserPassword(ctx context.Context, username string, passwo
 		return fmt.Errorf("failed to create password update request: %w", err)
 	}
 
-	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
