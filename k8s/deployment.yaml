@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: baton-argo-cd
+  namespace: argocd
+  labels:
+    app: baton-argo-cd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: baton-argo-cd
+  template:
+    metadata:
+      labels:
+        app: baton-argo-cd
+    spec:
+      serviceAccountName: baton-argo-cd
+      containers:
+        - name: baton-argo-cd
+          image: baton-argo-cd:latest  # Update with your image registry
+          imagePullPolicy: Never  # Use Never for local MicroK8s images
+          env:
+            # Argo CD API configuration
+            # Note: Baton SDK uses BATON_ prefix and converts - to _
+            - name: BATON_API_URL
+              value: "http://argocd-server.argocd.svc.cluster.local"  # Internal service URL (HTTP for internal cluster)
+            - name: BATON_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: baton-argo-cd-secret
+                  key: username
+            - name: BATON_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: baton-argo-cd-secret
+                  key: password
+            # Optional: validate role prefix (defaults to false)
+            - name: BATON_VALIDATE_ROLE_PREFIX
+              value: "false"
+            # Kubeconfig is optional when using in-cluster config
+            # Leave BATON_KUBECONFIG unset to use in-cluster config automatically
+            # Service mode configuration (for provisioning/daemon mode)
+            - name: BATON_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: baton-argo-cd-secret
+                  key: client-id
+            - name: BATON_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: baton-argo-cd-secret
+                  key: client-secret
+            - name: BATON_PROVISIONING
+              value: "true"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+      # Optional: Add security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532  # nonroot user from distroless image
+

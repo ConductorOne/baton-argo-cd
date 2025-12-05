@@ -24,13 +24,23 @@ var (
 		field.WithRequired(true),
 		field.WithDisplayName("API URL"),
 	)
-	ConfigurationFields = []field.SchemaField{UsernameField, PasswordField, ApiUrlField}
-
+	KubeconfigPathField = field.FileUploadField(
+		"kubeconfig",
+		[]string{""},
+		field.WithDescription("Kubeconfig file."),
+		field.WithRequired(false),
+		field.WithIsSecret(true),
+		field.WithDisplayName("Kubeconfig file"),
+	)
+	ConfigurationFields = []field.SchemaField{
+		UsernameField, PasswordField, ApiUrlField, KubeconfigPathField,
+	}
 	FieldRelationships = []field.SchemaFieldRelationship{
 		field.FieldsRequiredTogether(UsernameField, PasswordField),
 	}
 )
 
+//go:generate go run ./gen
 var Config = field.NewConfiguration(
 	ConfigurationFields,
 	field.WithConstraints(FieldRelationships...),

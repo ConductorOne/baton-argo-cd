@@ -1,75 +1,495 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"path/filepath"
 	"strings"
+	"time"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
-	"golang.org/x/crypto/bcrypt"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
 )
 
 const (
-	argoCDCommand              = "argocd"
-	argoCDSecretName           = "argocd-secret"
+	// Policy configuration keys in RBAC ConfigMap.
+	policyDefaultKey = "policy.default"
+	policyCSVKey     = "policy.csv"
+
+	// Role and policy parsing constants.
+	rolePrefix = "role:"
+
+	// PolicyTypeGrant indicates a role grant ('g') policy line.
+	policyTypeGrant = "g"
+	// PolicyTypeDefinition indicates a policy definition ('p') line.
+	policyTypeDefinition = "p"
+
+	// Kubernetes resource constants.
+	rbacConfigMapName = "argocd-rbac-cm"
+	argocdNamespace   = "argocd"
+
 	argoCDConfigMapName        = "argocd-cm"
 	defaultAccountCapabilities = "apiKey, login"
-	userGrantPrefix            = "g"
 )
 
-// Client provides methods to interact with Argo CD, primarily through its command-line interface (CLI).
-// It also directly manipulates its underlying Kubernetes resources (ConfigMaps and Secrets).
-// This approach is taken to manage RBAC and user accounts.
-type Client struct {
-	apiUrl   string
-	username string
-	password string
-}
+const (
+	updateUserPasswordURL = "/api/v1/account/password" //nolint:gosec // updateUserPasswordURL is an API path, no hardcoded credentials.
+	getAccountsURL        = "/api/v1/account"
+	sessionURL            = "/api/v1/session"
+)
 
-// NewClient creates a new Client instance.
-// The credentials are used for authenticating with the Argo CD CLI.
-func NewClient(ctx context.Context, apiUrl string, username string, password string) *Client {
-	return &Client{
-		apiUrl:   apiUrl,
-		username: username,
-		password: password,
-	}
-}
-
-// GetAccounts fetches a list of real accounts from ArgoCD using the CLI.
-// Command: argocd account list --output json.
-func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
-	output, err := c.runArgoCDCommandWithOutput(ctx, AccountCommand, ListCommand, OutputFlagLong, JSONOutput)
+// buildURL constructs a proper URL by joining the base URL with the path.
+// It handles cases where the base URL might not end with a slash and the path might not start with one.
+func (c *Client) buildURL(path string) (string, error) {
+	baseURL, err := url.Parse(c.apiUrl)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get accounts: %w", err)
+		return "", fmt.Errorf("invalid base URL: %w", err)
 	}
 
-	var accounts []*Account
-	if err := json.Unmarshal(output, &accounts); err != nil {
-		return nil, fmt.Errorf("failed to parse accounts JSON: %w (original output: %s)", err, string(output))
+	pathURL, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
 	}
 
-	return accounts, nil
+	return baseURL.ResolveReference(pathURL).String(), nil
 }
 
-// GetRoles fetches a list of roles from the ArgoCD RBAC config map.
+// authRoundTripper is a custom RoundTripper that ensures authentication before each request.
+type authRoundTripper struct {
+	base   http.RoundTripper
+	client *Client
+}
+
+// RoundTrip implements http.RoundTripper interface.
+// It ensures authentication before making the request and adds auth headers.
+func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Skip authentication for session endpoints to avoid infinite recursion
+	reqURL := req.URL.Path
+	if reqURL == sessionURL || strings.HasSuffix(reqURL, sessionURL) {
+		return rt.base.RoundTrip(req)
+	}
+
+	// Ensure authentication before the request
+	if err := rt.client.ensureAuthenticated(req.Context()); err != nil {
+		return nil, fmt.Errorf("failed to ensure authentication: %w", err)
+	}
+
+	// Add auth headers to the request
+	rt.client.setAuthHeader(req)
+
+	// Execute the request using the base transport
+	return rt.base.RoundTrip(req)
+}
+
+// Client provides methods to interact with Argo CD via its REST API.
+type Client struct {
+	apiUrl         string
+	username       string
+	password       string
+	kubeconfigFile []byte
+	httpClient     *http.Client
+	sessionToken   string
+	tokenExpiry    time.Time
+	k8sClient      kubernetes.Interface
+}
+
+// NewClient creates a new API Client instance.
+func NewClient(ctx context.Context, apiUrl string, username string, password string, kubeconfigFile []byte) (*Client, error) {
+	transport := &http.Transport{}
+	finalBaseUrl := strings.TrimSuffix(apiUrl, "/")
+
+	// Handle insecure TLS for localhost URLs for development
+	if strings.HasPrefix(apiUrl, "http://localhost") || strings.HasPrefix(apiUrl, "http://127.0.0.1") {
+		//nolint:gosec // G402: InsecureSkipVerify is intentional for localhost development
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	if !strings.HasPrefix(apiUrl, "http://") && !strings.HasPrefix(apiUrl, "https://") {
+		//nolint:gosec // G402: InsecureSkipVerify is intentional for development scenarios
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		finalBaseUrl = "http://" + finalBaseUrl
+	}
+
+	// Build uhttp options
+	uhttpOpts := []uhttp.Option{
+		uhttp.WithLogger(true, ctxzap.Extract(ctx)),
+	}
+	// Apply TLS config to uhttp if we have one
+	if transport.TLSClientConfig != nil {
+		uhttpOpts = append(uhttpOpts, uhttp.WithTLSClientConfig(transport.TLSClientConfig))
+	}
+	httpClient, err := uhttp.NewClient(ctx, uhttpOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create uhttp client: %w", err)
+	}
+	httpClient.Timeout = 30 * time.Second
+
+	// Initialize Kubernetes client
+	k8sClient, err := initKubernetesClient(ctx, kubeconfigFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Kubernetes client: %w", err)
+	}
+
+	// Create client instance first (needed for roundtripper)
+	client := &Client{
+		apiUrl:         finalBaseUrl,
+		username:       username,
+		password:       password,
+		kubeconfigFile: kubeconfigFile,
+		httpClient:     httpClient,
+		k8sClient:      k8sClient,
+	}
+
+	// Wrap the uhttp transport with authentication roundtripper
+	// This preserves uhttp's logging and other features while adding authentication
+	authRT := &authRoundTripper{
+		base:   httpClient.Transport,
+		client: client,
+	}
+	httpClient.Transport = authRT
+
+	return client, nil
+}
+
+func getUhttpClient(ctx context.Context, config *rest.Config) (*http.Client, error) {
+	// Extract TLS config from Kubernetes config (includes CA certificate for in-cluster config)
+	tlsConfig, err := rest.TLSConfigFor(config)
+	if err != nil {
+		return nil, fmt.Errorf("getting TLS config from kubernetes config: %w", err)
+	}
+
+	// Build uhttp options with TLS config
+	uhttpOpts := []uhttp.Option{
+		uhttp.WithLogger(true, ctxzap.Extract(ctx)),
+	}
+	if tlsConfig != nil {
+		uhttpOpts = append(uhttpOpts, uhttp.WithTLSClientConfig(tlsConfig))
+	}
+
+	// Create uhttp transport for logging with proper TLS config
+	uhttpTransport, err := uhttp.NewTransport(ctx, uhttpOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating uhttp transport: %w", err)
+	}
+
+	// Wrap the uhttp transport with Kubernetes authentication wrappers
+	// This adds Bearer token injection on top of the uhttp logging transport
+	authenticatedTransport, err := rest.HTTPWrappersForConfig(config, uhttpTransport)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping transport with kubernetes authentication: %w", err)
+	}
+
+	httpClient := &http.Client{
+		Transport: authenticatedTransport,
+		Timeout:   300 * time.Second, // Match uhttp default timeout
+	}
+
+	return httpClient, nil
+}
+
+// initKubernetesClient initializes a Kubernetes client.
+// If no kubeconfig is provided, it tries to load from ~/.kube/config or uses in-cluster config if running in a pod.
+func initKubernetesClient(ctx context.Context, kubeconfigFile []byte) (kubernetes.Interface, error) {
+	l := ctxzap.Extract(ctx)
+	var config *rest.Config
+	var err error
+
+	// Try in-cluster config (if running inside a Kubernetes pod) if no kubeconfigFile was provided.
+	if config, err = rest.InClusterConfig(); err == nil && len(kubeconfigFile) == 0 {
+		// Use getUhttpClient to properly extract TLS config (including CA certificate) from rest.Config
+		httpClient, err := getUhttpClient(ctx, config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HTTP client for in-cluster config: %w", err)
+		}
+		clientset, err := kubernetes.NewForConfigAndClient(config, httpClient)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Kubernetes clientset: %w", err)
+		}
+		l.Debug("Created Kubernetes clientset for in-cluster config")
+		return clientset, nil
+	}
+
+	// If kubeconfig bytes are provided, load directly from bytes
+	if len(kubeconfigFile) != 0 {
+		config, err = clientcmd.RESTConfigFromKubeConfig(kubeconfigFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build Kubernetes config from provided kubeconfig: %w", err)
+		}
+		l.Debug("Created Kubernetes config from provided kubeconfig")
+	} else {
+		// Fall back to default kubeconfig file
+		var kubeconfig string
+		if home := homedir.HomeDir(); home != "" {
+			// Default kubeconfig file
+			kubeconfig = filepath.Join(home, ".kube", "config")
+		}
+
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build Kubernetes config: %w", err)
+		}
+		l.Debug("Created Kubernetes config from default kubeconfig file")
+	}
+	httpClient, err := getUhttpClient(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("fail to create HTTP client: %w", err)
+	}
+	clientset, err := kubernetes.NewForConfigAndClient(config, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes clientset: %w", err)
+	}
+	return clientset, nil
+}
+
+// ensureAuthenticated ensures the client is authenticated with ArgoCD API.
+// It authenticates using the /api/v1/session endpoint and stores the session token.
+// It checks token expiration and refreshes if needed (2 minutes before expiry).
+func (c *Client) ensureAuthenticated(ctx context.Context) error {
+	l := ctxzap.Extract(ctx)
+
+	// If we already have a session token, check if it's still valid based on expiration
+	if c.sessionToken != "" {
+		// Refresh token if it expires within 2 minutes
+		refreshThreshold := 2 * time.Minute
+		now := time.Now()
+
+		// If token expiry is zero (not set), we can't determine validity, so re-authenticate
+		switch {
+		case c.tokenExpiry.IsZero():
+			l.Debug("ArgoCD API session token expiry not set, re-authenticating")
+			c.sessionToken = ""
+			c.tokenExpiry = time.Time{}
+		case now.Add(refreshThreshold).Before(c.tokenExpiry):
+			// Token is still valid (expires more than 2 minutes from now)
+			l.Debug("ArgoCD API session token still valid", zap.Time("expires_at", c.tokenExpiry))
+			return nil
+		default:
+			// Token is about to expire or has expired, clear it to force re-authentication
+			l.Debug("ArgoCD API session token expired or expiring soon", zap.Time("expires_at", c.tokenExpiry), zap.Time("now", now))
+			c.sessionToken = ""
+			c.tokenExpiry = time.Time{}
+		}
+	}
+
+	// Authenticate with ArgoCD API
+	l.Debug("Authenticating with ArgoCD API")
+	authURL, err := c.buildURL(sessionURL)
+	if err != nil {
+		return fmt.Errorf("failed to build session URL: %w", err)
+	}
+
+	loginData := map[string]string{
+		"username": c.username,
+		"password": c.password,
+	}
+
+	jsonData, err := json.Marshal(loginData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal login data: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return fmt.Errorf("failed to create login request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate with ArgoCD API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// If no cookie found, try to read token from response body
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var sessionResp struct {
+		Token string `json:"token"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &sessionResp); err != nil {
+		return fmt.Errorf("failed to parse session response: %w", err)
+	}
+
+	if sessionResp.Token == "" {
+		return fmt.Errorf("session token not found in response")
+	}
+
+	c.sessionToken = sessionResp.Token
+
+	// Extract expiration from JWT token
+	// ArgoCD tokens are JWTs, so we can decode them to get the expiration
+	tokenExpiry, err := extractExpirationFromJWT(sessionResp.Token)
+	if err != nil {
+		l.Debug("Failed to extract expiration from JWT, using default 24 hours", zap.Error(err))
+		// Fallback to 24 hours if we can't parse the token
+		c.tokenExpiry = time.Now().Add(24 * time.Hour)
+	} else {
+		c.tokenExpiry = tokenExpiry
+	}
+
+	l.Debug("Successfully authenticated with ArgoCD API", zap.Time("expires_at", c.tokenExpiry))
+	return nil
+}
+
+// extractExpirationFromJWT extracts the expiration time from a JWT token.
+// It decodes the JWT payload and reads the 'exp' claim.
+func extractExpirationFromJWT(tokenString string) (time.Time, error) {
+	// Parse the JWT without verification (we only need to read the expiration)
+	// JWTs are in the format: header.payload.signature
+	parts := strings.Split(tokenString, ".")
+	if len(parts) != 3 {
+		return time.Time{}, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
+	}
+
+	// Decode the payload (second part)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
+	}
+
+	// Parse the payload JSON
+	var claims struct {
+		Exp *jwt.NumericDate `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, fmt.Errorf("failed to unmarshal JWT claims: %w", err)
+	}
+
+	if claims.Exp == nil {
+		return time.Time{}, fmt.Errorf("JWT does not contain 'exp' claim")
+	}
+	return time.Parse(time.RFC3339, string(claims.Exp.UTC().AppendFormat([]byte{}, "2006-01-02T15:04:05Z07:00")))
+}
+
+// setAuthHeader sets the authentication header for the request.
+func (c *Client) setAuthHeader(req *http.Request) {
+	if c.sessionToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.sessionToken)
+	}
+}
+
+// GetAccounts fetches a list of accounts from ArgoCD using the API.
+// Endpoint: GET /api/v1/account.
+func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
+	accountsURL, err := c.buildURL(getAccountsURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build accounts URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, accountsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create accounts request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch accounts: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to fetch accounts with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Parse the response
+	var accountsResponse struct {
+		Items []*Account `json:"items"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&accountsResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse accounts JSON: %w", err)
+	}
+
+	return accountsResponse.Items, nil
+}
+
+// GetRBACConfigMap fetches the argocd-rbac-cm ConfigMap from the Kubernetes cluster using the K8s SDK.
+func (c *Client) GetRBACConfigMap(ctx context.Context) (*corev1.ConfigMap, error) {
+	l := ctxzap.Extract(ctx)
+
+	l.Debug("attempting to fetch ConfigMap",
+		zap.String("name", rbacConfigMapName),
+		zap.String("namespace", argocdNamespace),
+	)
+
+	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, rbacConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		l.Error("failed to fetch ConfigMap",
+			zap.String("name", rbacConfigMapName),
+			zap.String("namespace", argocdNamespace),
+			zap.Error(err),
+		)
+		// Log additional error details if available
+		// Check if it's a Kubernetes API error
+		if statusErr, ok := err.(interface {
+			Status() metav1.Status
+		}); ok {
+			status := statusErr.Status()
+			l.Error("Kubernetes API error details",
+				zap.String("status", status.Status),
+				zap.String("message", status.Message),
+				zap.String("reason", string(status.Reason)),
+				zap.Int32("code", status.Code),
+			)
+		}
+		return nil, fmt.Errorf("failed to fetch ConfigMap '%s' in namespace '%s': %w", rbacConfigMapName, argocdNamespace, err)
+	}
+
+	if cm.Data == nil {
+		l.Warn("ConfigMap has no data section", zap.String("name", rbacConfigMapName))
+	}
+
+	l.Debug("Successfully fetched RBAC ConfigMap", zap.String("name", rbacConfigMapName))
+	return cm, nil
+}
+
+// GetRoles fetches a list of roles from the ArgoCD RBAC config map using the Kubernetes SDK.
 // It parses role definitions and grants from the 'policy.csv' key.
-// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
+// It also includes the two basic built-in roles: 'readonly' and 'admin' which are not in the ConfigMap.
 func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
 	var annos annotations.Annotations
-	cm, err := getRBACConfigMap(ctx)
+	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	policyData := cm.Data[PolicyCSVKey]
-	defaultPolicy, okDefault := cm.Data[PolicyDefaultKey]
+	policyData, ok := cm.Data[policyCSVKey]
+	if !ok {
+		l.Warn("policy csv not found in configmap")
+	}
+	defaultPolicy, okDefault := cm.Data[policyDefaultKey]
 
 	// Get role names defined in policy.csv (p, role, ...) and from grant lines (g, sub, role)
 	roleNames, err := getRoleNamesFromCSV(policyData)
@@ -78,9 +498,16 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 	}
 
 	if okDefault && defaultPolicy != "" {
-		roleName := strings.TrimPrefix(defaultPolicy, RolePrefix)
-		roleNames[roleName] = struct{}{}
+		roleName := strings.TrimPrefix(defaultPolicy, rolePrefix)
+		if roleName != "" {
+			roleNames[roleName] = true
+		}
 	}
+
+	// Always include the two basic built-in roles that are not in the ConfigMap
+	// Docs: https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/#basic-built-in-roles
+	roleNames["readonly"] = true
+	roleNames["admin"] = true
 
 	var roles []*Role
 	for name := range roleNames {
@@ -88,39 +515,54 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 			Name: name,
 		})
 	}
+
 	return roles, annos, nil
 }
 
-// GetDefaultRole fetches the default role from the ArgoCD RBAC config map.
-// Command: kubectl get cm argocd-rbac-cm -n argocd -o json.
+func (c *Client) CreateAccount(ctx context.Context, username string, password string) (*Account, annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
+	cmPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s", "value": "%s"}]`, username, defaultAccountCapabilities)
+	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.JSONPatchType, []byte(cmPatch), metav1.PatchOptions{}); err != nil {
+		return nil, nil, fmt.Errorf("failed to update ConfigMap: %w", err)
+	}
+	l.Debug("ConfigMap updated successfully")
+	err := c.UpdateUserPassword(ctx, username, password)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to update user password: %w", err)
+	}
+	account := &Account{
+		Name:         username,
+		Enabled:      true,
+		Capabilities: strings.Split(defaultAccountCapabilities, ", "),
+	}
+	return account, nil, nil
+}
+
 func (c *Client) GetDefaultRole(ctx context.Context) (string, error) {
-	cm, err := getRBACConfigMap(ctx)
+	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
 		return "", err
 	}
 
-	defaultPolicy, ok := cm.Data[PolicyDefaultKey]
+	defaultPolicy, ok := cm.Data[policyDefaultKey]
 	if !ok {
 		return "", nil
 	}
 
 	if defaultPolicy != "" {
-		return strings.TrimPrefix(defaultPolicy, RolePrefix), nil
+		return strings.TrimPrefix(defaultPolicy, rolePrefix), nil
 	}
 	return "", nil
 }
 
-// UpdateUserRole adds a role grant for a user to the `argocd-rbac-cm` ConfigMap.
-// It reads the existing `policy.csv`, adds the new grant, and patches the ConfigMap
-// by calling the `updateRBACPolicy` helper function.
-// Command: kubectl patch configmap argocd-rbac-cm ...
 func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
-	cm, err := getRBACConfigMap(ctx)
+	l := ctxzap.Extract(ctx)
+	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
 	}
 
-	policyCsv, ok := cm.Data[PolicyCSVKey]
+	policyCsv, ok := cm.Data[policyCSVKey]
 	if !ok {
 		policyCsv = ""
 	}
@@ -136,23 +578,19 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 	}
 
 	prefixedRoleID := roleID
-	if !strings.HasPrefix(roleID, RolePrefix) {
-		prefixedRoleID = RolePrefix + roleID
+	if !strings.HasPrefix(roleID, rolePrefix) {
+		prefixedRoleID = rolePrefix + roleID
 	}
 
-	roleExists := false
 	for _, record := range records {
-		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID && record[2] == prefixedRoleID {
-			roleExists = true
-			break
+		if len(record) > 2 && record[0] == policyTypeGrant && record[1] == userID && record[2] == prefixedRoleID {
+			l.Debug("role already exists", zap.String("role", record[2]))
+			return annotations.New(&v2.GrantAlreadyExists{}), nil
 		}
 	}
 
-	if roleExists {
-		return annotations.New(&v2.GrantAlreadyExists{}), nil
-	}
-
-	records = append(records, []string{userGrantPrefix, userID, prefixedRoleID})
+	l.Debug("adding role to policy", zap.String("role", prefixedRoleID))
+	records = append(records, []string{policyTypeGrant, userID, prefixedRoleID})
 
 	if err := c.updateRBACPolicy(ctx, records, ok); err != nil {
 		return nil, fmt.Errorf("failed to update rbac policy: %w", err)
@@ -161,17 +599,94 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 	return nil, nil
 }
 
+func (c *Client) updateRBACPolicy(ctx context.Context, records [][]string, policyExists bool) error {
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+	if err := writer.WriteAll(records); err != nil {
+		return fmt.Errorf("failed to write policy csv: %w", err)
+	}
+
+	updatedPolicyCsv := buf.String()
+
+	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
+	if err != nil {
+		return fmt.Errorf("failed to marshal policy csv for patch: %w", err)
+	}
+
+	var patch string
+	if policyExists {
+		patch = fmt.Sprintf(`[{"op": "replace", "path": "/data/%s", "value": %s}]`, policyCSVKey, string(marshaledCsv))
+	} else {
+		patch = fmt.Sprintf(`[{"op": "add", "path": "/data/%s", "value": %s}]`, policyCSVKey, string(marshaledCsv))
+	}
+
+	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, rbacConfigMapName, types.JSONPatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("failed to patch rbac configmap: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateUserPasswordRequest represents the request body for updating a user's password.
+type UpdateUserPasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	Name            string `json:"name"`
+	NewPassword     string `json:"newPassword"`
+}
+
+// UpdateUserPassword updates a user's password using the ArgoCD API.
+// Endpoint: PUT /api/v1/account/password.
+func (c *Client) UpdateUserPassword(ctx context.Context, username string, password string) error {
+	updatePasswordURL, err := c.buildURL(updateUserPasswordURL)
+	if err != nil {
+		return fmt.Errorf("failed to build password update URL: %w", err)
+	}
+
+	// Create the request body
+	requestBody := UpdateUserPasswordRequest{
+		CurrentPassword: c.password, // Use admin password as current password
+		Name:            username,
+		NewPassword:     password,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal password update request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, updatePasswordURL, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return fmt.Errorf("failed to create password update request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update user password: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to update user password with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Success response is empty body with 200 status
+	return nil
+}
+
 // RemoveUserRole removes a role grant from a user in the `argocd-rbac-cm` ConfigMap.
 // It reads the existing `policy.csv`, removes the grant, and patches the ConfigMap
-// by calling the `updateRBACPolicy` helper function.
-// Command: kubectl patch configmap argocd-rbac-cm ...
+// using the Kubernetes SDK.
 func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
-	cm, err := getRBACConfigMap(ctx)
+	l := ctxzap.Extract(ctx)
+	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
 	}
 
-	policyCsv, ok := cm.Data[PolicyCSVKey]
+	policyCsv, ok := cm.Data[policyCSVKey]
 	if !ok {
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
@@ -189,10 +704,15 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 	var newRecords [][]string
 	var roleRemoved bool
 
+	prefixedRoleID := roleID
+	if !strings.HasPrefix(roleID, rolePrefix) {
+		prefixedRoleID = rolePrefix + roleID
+	}
+
 	for _, record := range records {
-		if len(record) > 2 && record[0] == userGrantPrefix && record[1] == userID {
-			policyRole := strings.TrimPrefix(record[2], RolePrefix)
-			if policyRole == roleID {
+		if len(record) > 2 && record[0] == policyTypeGrant && record[1] == userID {
+			policyRole := strings.TrimPrefix(record[2], rolePrefix)
+			if policyRole == roleID || record[2] == prefixedRoleID {
 				roleRemoved = true
 				continue
 			}
@@ -201,9 +721,9 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 	}
 
 	if !roleRemoved {
+		l.Debug("role already revoked", zap.String("role", prefixedRoleID))
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
-
 	if err := c.updateRBACPolicy(ctx, newRecords, ok); err != nil {
 		return nil, fmt.Errorf("failed to update rbac policy: %w", err)
 	}
@@ -211,124 +731,52 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 	return nil, nil
 }
 
-// CreateAccount creates a new local user in ArgoCD with the provided username and password.
-// Command: kubectl patch configmap argocd-cm -n argocd --type=json -p '[{"op": "add", "path": "/data/accounts.USERNAME", "value": "apiKey, login"}]'.
-// Command: kubectl patch secret argocd-secret -n argocd --type=json -p '[{"op": "add", "path": "/data/accounts.USERNAME.password", "value": "ENCODED_PASSWORD"}]'.
-func (c *Client) CreateAccount(ctx context.Context, username string, password string) (*Account, annotations.Annotations, error) {
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to hash password: %w", err)
-	}
-	encodedPassword := base64.StdEncoding.EncodeToString(hashedPassword)
-
-	cmPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s", "value": "%s"}]`, username, defaultAccountCapabilities)
-	if err := c.runKubectlCommand(ctx, "patch", "configmap", argoCDConfigMapName, NamespaceFlag, ArgocdNamespace, "--type=json", "-p", cmPatch); err != nil {
-		return nil, nil, fmt.Errorf("failed to update ConfigMap: %w", err)
-	}
-
-	secretPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s.password", "value": "%s"}]`, username, encodedPassword)
-	if err := c.runKubectlCommand(ctx, "patch", "secret", argoCDSecretName, NamespaceFlag, ArgocdNamespace, "--type=json", "-p", secretPatch); err != nil {
-		return nil, nil, fmt.Errorf("failed to update Secret: %w", err)
-	}
-
-	l := ctxzap.Extract(ctx)
-	defaultRole, err := c.GetDefaultRole(ctx)
-	if err != nil {
-		l.Warn("failed to get default role for new user",
-			zap.String("user", username),
-			zap.Error(err),
-		)
-	}
-
-	if defaultRole != "" {
-		if _, err := c.UpdateUserRole(ctx, username, defaultRole); err != nil {
-			l.Warn("failed to assign default role to new user",
-				zap.String("role", defaultRole),
-				zap.String("user", username),
-				zap.Error(err),
-			)
-		}
-	}
-
-	account := &Account{
-		Name:         username,
-		Enabled:      true,
-		Capabilities: strings.Split(defaultAccountCapabilities, ", "),
-	}
-
-	return account, nil, nil
-}
-
-// GetRoleSubjects returns a list of subjects that have a given role.
-// It filters the 'policy.csv' data using a shell command.
-// Command: kubectl get cm argocd-rbac-cm ... | grep -E '^g,[^,]+,ROLE_NAME$'.
-// Example:
-// kubectl get cm argocd-rbac-cm -n argocd -o jsonpath='{.data.policy\.csv}' | grep -E '^g,[^,]+,(role:)?admin$'
-// g,admin,role:admin.
-// g,argocd-admins,role:admin.
+// GetRoleSubjects returns a list of subjects (users/groups) that have a given role.
+// It parses the 'policy.csv' data and filters for grants matching the roleName.
 func (c *Client) GetRoleSubjects(ctx context.Context, roleName string) ([]string, error) {
-	// Use grep to fetch only policy lines relevant to the role.
-	// It checks for the role with and without the "role:" prefix.
-	grepCmd := fmt.Sprintf("grep -E '^%s,[^,]+,(%s)?%s$'", PolicyTypeGrant, RolePrefix, roleName)
-	policyDataBytes, err := getFilteredPolicyCSV(ctx, grepCmd)
+	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute command to get role subjects: %w", err)
+		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
 	}
 
-	if len(policyDataBytes) == 0 {
+	policyCsv, ok := cm.Data[policyCSVKey]
+	if !ok {
 		return nil, nil
 	}
 
-	bindings, _, err := ParseArgoCDPolicyCSV(string(policyDataBytes))
+	reader := csv.NewReader(strings.NewReader(policyCsv))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse filtered policy csv for role subjects: %w", err)
+		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
 	}
 
 	var subjects []string
-	for _, binding := range bindings {
-		subjects = append(subjects, binding.Subject)
+	prefixedRoleName := rolePrefix + roleName
+
+	for _, record := range records {
+		if len(record) == 0 {
+			continue
+		}
+
+		for i := range record {
+			record[i] = strings.TrimSpace(record[i])
+		}
+
+		if len(record) >= 3 && record[0] == policyTypeGrant {
+			// Check if the role matches (with or without prefix)
+			policyRole := strings.TrimPrefix(record[2], rolePrefix)
+			if policyRole == roleName || record[2] == prefixedRoleName {
+				subject := strings.TrimSpace(record[1])
+				if subject != "" {
+					subjects = append(subjects, subject)
+				}
+			}
+		}
 	}
 
 	return subjects, nil
-}
-
-// GetUserRoles returns a list of roles for a given user.
-// It filters the 'policy.csv' data using a shell command.
-// Command: kubectl get cm argocd-rbac-cm ... | grep -E '^g,USER_ID,'.
-// Example:
-// kubectl get cm argocd-rbac-cm -n argocd -o jsonpath='{.data.policy\.csv}' | grep -E '^g,admin,'
-// g,admin,role:admin.
-// g,admin,role:viewer.
-func (c *Client) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
-	// Use grep to fetch only policy lines relevant to the user.
-	grepCmd := fmt.Sprintf("grep -E '^%s,%s,'", PolicyTypeGrant, userID)
-	policyDataBytes, err := getFilteredPolicyCSV(ctx, grepCmd)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute command to get user roles: %w", err)
-	}
-
-	// If grep returns no results, the user has no explicit roles.
-	// In this case, they may have a default role.
-	if len(policyDataBytes) == 0 {
-		defaultRole, err := c.GetDefaultRole(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get default role: %w", err)
-		}
-		if defaultRole != "" {
-			return []string{defaultRole}, nil
-		}
-		return nil, nil
-	}
-
-	bindings, _, err := ParseArgoCDPolicyCSV(string(policyDataBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse filtered policy csv for user roles: %w", err)
-	}
-
-	var roles []string
-	for _, binding := range bindings {
-		roles = append(roles, binding.Role)
-	}
-
-	return roles, nil
 }
