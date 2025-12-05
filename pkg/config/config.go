@@ -27,8 +27,9 @@ var (
 	KubeconfigPathField = field.FileUploadField(
 		"kubeconfig",
 		[]string{""},
-		field.WithDescription("Path to the kubeconfig file."),
+		field.WithDescription("Kubeconfig file."),
 		field.WithRequired(false),
+		field.WithIsSecret(true),
 		field.WithDisplayName("Kubeconfig file"),
 	)
 	ConfigurationFields = []field.SchemaField{

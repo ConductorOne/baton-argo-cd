@@ -25,6 +25,7 @@ func getRoleNamesFromCSV(csvData string) (map[string]bool, error) {
 
 	roleNames := make(map[string]bool)
 	roleNamesDefinitions := make(map[string]bool)
+	rolesWithPrefix := make(map[string]bool) // Track roles with "role:" prefix
 
 	for _, fields := range records {
 		if len(fields) == 0 {
@@ -47,10 +48,15 @@ func getRoleNamesFromCSV(csvData string) (map[string]bool, error) {
 		case policyTypeDefinition:
 			// Policy definition can be over a role (creates the role), user or group.
 			if len(fields) >= 4 {
+				// Check if it has the "role:" prefix before trimming
+				hasRolePrefix := strings.HasPrefix(fields[1], rolePrefix)
 				role := strings.TrimPrefix(fields[1], rolePrefix)
 				if role != "" {
 					roleNamesDefinitions[role] = true
 					roleNames[role] = true
+				}
+				if hasRolePrefix {
+					rolesWithPrefix[role] = true
 				}
 			}
 		default:
@@ -61,12 +67,24 @@ func getRoleNamesFromCSV(csvData string) (map[string]bool, error) {
 	finalRoles := make(map[string]bool)
 
 	for role := range roleNamesDefinitions {
+		// Add if it has a grant line OR if it has the "role:" prefix
+		hasGrant := false
 		if _, ok := roleNames[role]; ok {
+			hasGrant = true
+		}
+
+		hasPrefix := false
+		if _, ok := rolesWithPrefix[role]; ok {
+			hasPrefix = true
+		}
+
+		if hasGrant || hasPrefix {
 			// We only want to add the role to the list if it is explicitly defined in the policy.csv
-			// The only way to distinguish a role in a policy definition from a user or group is if it has a grant line.
-			// Although its best practice and recommended to define the role names with the prefix "role:" this is not mandatory.
+			// The only way to distinguish a role in a policy definition from a user or group is if it has a grant line
+			// OR if it has the "role:" prefix. Although its best practice and recommended to define the role names
+			// with the prefix "role:" this is not mandatory.
 			finalRoles[role] = true
 		}
 	}
-	return roleNames, nil
+	return finalRoles, nil
 }
