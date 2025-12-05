@@ -53,7 +53,6 @@ func getRoleNamesFromCSV(csvData string) (map[string]bool, error) {
 				role := strings.TrimPrefix(fields[1], rolePrefix)
 				if role != "" {
 					roleNamesDefinitions[role] = true
-					roleNames[role] = true
 				}
 				if hasRolePrefix {
 					rolesWithPrefix[role] = true
