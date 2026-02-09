@@ -32,8 +32,22 @@ var (
 		field.WithIsSecret(true),
 		field.WithDisplayName("Kubeconfig file"),
 	)
+	InsecureSkipVerifyField = field.BoolField(
+		"insecure-skip-verify",
+		field.WithDescription("Skip TLS certificate verification (insecure, use only for testing)"),
+		field.WithRequired(false),
+		field.WithDisplayName("Skip TLS Verification"),
+	)
+	CACertPathField = field.FileUploadField(
+		"ca-cert-path",
+		[]string{""},
+		field.WithDescription("Path to CA certificate file for TLS verification"),
+		field.WithRequired(false),
+		field.WithIsSecret(true),
+		field.WithDisplayName("CA Certificate"),
+	)
 	ConfigurationFields = []field.SchemaField{
-		UsernameField, PasswordField, ApiUrlField, KubeconfigPathField,
+		UsernameField, PasswordField, ApiUrlField, KubeconfigPathField, InsecureSkipVerifyField, CACertPathField,
 	}
 	FieldRelationships = []field.SchemaFieldRelationship{
 		field.FieldsRequiredTogether(UsernameField, PasswordField),

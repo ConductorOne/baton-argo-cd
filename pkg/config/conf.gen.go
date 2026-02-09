@@ -8,6 +8,8 @@ type ArgoCd struct {
 	Password string `mapstructure:"password"`
 	ApiUrl string `mapstructure:"api-url"`
 	Kubeconfig []byte `mapstructure:"kubeconfig"`
+	InsecureSkipVerify bool `mapstructure:"insecure-skip-verify"`
+	CaCertPath []byte `mapstructure:"ca-cert-path"`
 }
 
 func (c *ArgoCd) findFieldByTag(tagValue string) (any, bool) {

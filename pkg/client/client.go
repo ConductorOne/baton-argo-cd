@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
@@ -113,28 +114,35 @@ type Client struct {
 }
 
 // NewClient creates a new API Client instance.
-func NewClient(ctx context.Context, apiUrl string, username string, password string, kubeconfigFile []byte) (*Client, error) {
-	transport := &http.Transport{}
+func NewClient(ctx context.Context, apiUrl string, username string, password string,
+	kubeconfigFile []byte, insecureSkipVerify bool, caCertData []byte) (*Client, error) {
 	finalBaseUrl := strings.TrimSuffix(apiUrl, "/")
 
-	// Handle insecure TLS for localhost URLs for development
-	if strings.HasPrefix(apiUrl, "http://localhost") || strings.HasPrefix(apiUrl, "http://127.0.0.1") {
-		//nolint:gosec // G402: InsecureSkipVerify is intentional for localhost development
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	}
-	if !strings.HasPrefix(apiUrl, "http://") && !strings.HasPrefix(apiUrl, "https://") {
-		//nolint:gosec // G402: InsecureSkipVerify is intentional for development scenarios
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		finalBaseUrl = "http://" + finalBaseUrl
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
 	}
 
-	// Build uhttp options
+	if insecureSkipVerify {
+		tlsConfig.InsecureSkipVerify = true
+	}
+
+	if len(caCertData) > 0 {
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCertData) {
+			return nil, fmt.Errorf("failed to append CA certificate to cert pool")
+		}
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	if !strings.HasPrefix(apiUrl, "http://") && !strings.HasPrefix(apiUrl, "https://") {
+		finalBaseUrl = "https://" + finalBaseUrl
+	}
+
 	uhttpOpts := []uhttp.Option{
 		uhttp.WithLogger(true, ctxzap.Extract(ctx)),
 	}
-	// Apply TLS config to uhttp if we have one
-	if transport.TLSClientConfig != nil {
-		uhttpOpts = append(uhttpOpts, uhttp.WithTLSClientConfig(transport.TLSClientConfig))
+	if insecureSkipVerify || len(caCertData) > 0 {
+		uhttpOpts = append(uhttpOpts, uhttp.WithTLSClientConfig(tlsConfig))
 	}
 	httpClient, err := uhttp.NewClient(ctx, uhttpOpts...)
 	if err != nil {
@@ -580,6 +588,36 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 	prefixedRoleID := roleID
 	if !strings.HasPrefix(roleID, rolePrefix) {
 		prefixedRoleID = rolePrefix + roleID
+	}
+
+	builtInRoles := map[string]bool{
+		"readonly": true,
+		"admin":    true,
+	}
+	normalizedRoleID := strings.TrimPrefix(prefixedRoleID, rolePrefix)
+	isBuiltIn := builtInRoles[normalizedRoleID]
+
+	if !isBuiltIn {
+		roleExists := false
+		for _, record := range records {
+			if len(record) >= 2 && record[0] == policyTypeDefinition {
+				recordRole := strings.TrimPrefix(record[1], rolePrefix)
+				if recordRole == normalizedRoleID || record[1] == prefixedRoleID {
+					roleExists = true
+					break
+				}
+			}
+		}
+
+		if !roleExists {
+			return nil, fmt.Errorf(
+				"argocd-connector: role definition not found in argocd-rbac-cm ConfigMap. "+
+					"Role '%s' must be defined with a policy line (p, role:%s, resource, action, object, effect) "+
+					"before it can be assigned. Example: 'p, role:%s, applications, get, */*, allow'. "+
+					"Add the role definition to the argocd-rbac-cm ConfigMap in the 'policy.csv' key",
+				normalizedRoleID, normalizedRoleID, normalizedRoleID,
+			)
+		}
 	}
 
 	for _, record := range records {

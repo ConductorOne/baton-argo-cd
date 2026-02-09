@@ -11,6 +11,7 @@ import (
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // MockClient is a mock implementation of the ArgoCD client for testing.
@@ -26,6 +27,7 @@ type MockClient struct {
 	GetUserRolesFunc           func(ctx context.Context, userID string) ([]string, error)
 	GetRoleSubjectsFunc        func(ctx context.Context, roleID string) ([]string, error)
 	GetRoleUsersFunc           func(ctx context.Context, roleID string) ([]*client.Account, error)
+	GetRBACConfigMapFunc       func(ctx context.Context) (*corev1.ConfigMap, error)
 }
 
 // GetAccounts calls the mock method if it is defined.
@@ -110,10 +112,17 @@ func (m *MockClient) GetRoleUsers(ctx context.Context, roleID string) ([]*client
 }
 
 // GetSubjectsForAllRoles calls the mock method if it is defined.
-
 func (m *MockClient) GetSubjectsForAllRoles(ctx context.Context) (map[string][]string, error) {
 	if m.GetSubjectsForAllRolesFunc != nil {
 		return m.GetSubjectsForAllRolesFunc(ctx)
+	}
+	return nil, nil
+}
+
+// GetRBACConfigMap calls the mock method if it is defined.
+func (m *MockClient) GetRBACConfigMap(ctx context.Context) (*corev1.ConfigMap, error) {
+	if m.GetRBACConfigMapFunc != nil {
+		return m.GetRBACConfigMapFunc(ctx)
 	}
 	return nil, nil
 }
