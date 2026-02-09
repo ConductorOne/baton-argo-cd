@@ -63,12 +63,12 @@ const (
 func (c *Client) buildURL(path string) (string, error) {
 	baseURL, err := url.Parse(c.apiUrl)
 	if err != nil {
-		return "", fmt.Errorf("invalid base URL: %w", err)
+		return "", fmt.Errorf("argocd-connector: invalid base URL: %w", err)
 	}
 
 	pathURL, err := url.Parse(path)
 	if err != nil {
-		return "", fmt.Errorf("invalid path: %w", err)
+		return "", fmt.Errorf("argocd-connector: invalid path: %w", err)
 	}
 
 	return baseURL.ResolveReference(pathURL).String(), nil
@@ -91,7 +91,7 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 	// Ensure authentication before the request
 	if err := rt.client.ensureAuthenticated(req.Context()); err != nil {
-		return nil, fmt.Errorf("failed to ensure authentication: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to ensure authentication: %w", err)
 	}
 
 	// Add auth headers to the request
@@ -129,7 +129,7 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 	if len(caCertData) > 0 {
 		caCertPool := x509.NewCertPool()
 		if !caCertPool.AppendCertsFromPEM(caCertData) {
-			return nil, fmt.Errorf("failed to append CA certificate to cert pool")
+			return nil, fmt.Errorf("argocd-connector: failed to append CA certificate to cert pool")
 		}
 		tlsConfig.RootCAs = caCertPool
 	}
@@ -146,14 +146,14 @@ func NewClient(ctx context.Context, apiUrl string, username string, password str
 	}
 	httpClient, err := uhttp.NewClient(ctx, uhttpOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create uhttp client: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to create uhttp client: %w", err)
 	}
 	httpClient.Timeout = 30 * time.Second
 
 	// Initialize Kubernetes client
 	k8sClient, err := initKubernetesClient(ctx, kubeconfigFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize Kubernetes client: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to initialize Kubernetes client: %w", err)
 	}
 
 	// Create client instance first (needed for roundtripper)
@@ -181,7 +181,7 @@ func getUhttpClient(ctx context.Context, config *rest.Config) (*http.Client, err
 	// Extract TLS config from Kubernetes config (includes CA certificate for in-cluster config)
 	tlsConfig, err := rest.TLSConfigFor(config)
 	if err != nil {
-		return nil, fmt.Errorf("getting TLS config from kubernetes config: %w", err)
+		return nil, fmt.Errorf("argocd-connector: getting TLS config from kubernetes config: %w", err)
 	}
 
 	// Build uhttp options with TLS config
@@ -195,14 +195,14 @@ func getUhttpClient(ctx context.Context, config *rest.Config) (*http.Client, err
 	// Create uhttp transport for logging with proper TLS config
 	uhttpTransport, err := uhttp.NewTransport(ctx, uhttpOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("creating uhttp transport: %w", err)
+		return nil, fmt.Errorf("argocd-connector: creating uhttp transport: %w", err)
 	}
 
 	// Wrap the uhttp transport with Kubernetes authentication wrappers
 	// This adds Bearer token injection on top of the uhttp logging transport
 	authenticatedTransport, err := rest.HTTPWrappersForConfig(config, uhttpTransport)
 	if err != nil {
-		return nil, fmt.Errorf("wrapping transport with kubernetes authentication: %w", err)
+		return nil, fmt.Errorf("argocd-connector: wrapping transport with kubernetes authentication: %w", err)
 	}
 
 	httpClient := &http.Client{
@@ -225,11 +225,11 @@ func initKubernetesClient(ctx context.Context, kubeconfigFile []byte) (kubernete
 		// Use getUhttpClient to properly extract TLS config (including CA certificate) from rest.Config
 		httpClient, err := getUhttpClient(ctx, config)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create HTTP client for in-cluster config: %w", err)
+			return nil, fmt.Errorf("argocd-connector: failed to create HTTP client for in-cluster config: %w", err)
 		}
 		clientset, err := kubernetes.NewForConfigAndClient(config, httpClient)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create Kubernetes clientset: %w", err)
+			return nil, fmt.Errorf("argocd-connector: failed to create Kubernetes clientset: %w", err)
 		}
 		l.Debug("Created Kubernetes clientset for in-cluster config")
 		return clientset, nil
@@ -239,7 +239,7 @@ func initKubernetesClient(ctx context.Context, kubeconfigFile []byte) (kubernete
 	if len(kubeconfigFile) != 0 {
 		config, err = clientcmd.RESTConfigFromKubeConfig(kubeconfigFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build Kubernetes config from provided kubeconfig: %w", err)
+			return nil, fmt.Errorf("argocd-connector: failed to build Kubernetes config from provided kubeconfig: %w", err)
 		}
 		l.Debug("Created Kubernetes config from provided kubeconfig")
 	} else {
@@ -252,17 +252,17 @@ func initKubernetesClient(ctx context.Context, kubeconfigFile []byte) (kubernete
 
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build Kubernetes config: %w", err)
+			return nil, fmt.Errorf("argocd-connector: failed to build Kubernetes config: %w", err)
 		}
 		l.Debug("Created Kubernetes config from default kubeconfig file")
 	}
 	httpClient, err := getUhttpClient(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("fail to create HTTP client: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to create HTTP client: %w", err)
 	}
 	clientset, err := kubernetes.NewForConfigAndClient(config, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Kubernetes clientset: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to create Kubernetes clientset: %w", err)
 	}
 	return clientset, nil
 }
@@ -301,7 +301,7 @@ func (c *Client) ensureAuthenticated(ctx context.Context) error {
 	l.Debug("Authenticating with ArgoCD API")
 	authURL, err := c.buildURL(sessionURL)
 	if err != nil {
-		return fmt.Errorf("failed to build session URL: %w", err)
+		return fmt.Errorf("argocd-connector: failed to build session URL: %w", err)
 	}
 
 	loginData := map[string]string{
@@ -311,31 +311,31 @@ func (c *Client) ensureAuthenticated(ctx context.Context) error {
 
 	jsonData, err := json.Marshal(loginData)
 	if err != nil {
-		return fmt.Errorf("failed to marshal login data: %w", err)
+		return fmt.Errorf("argocd-connector: failed to marshal login data: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, strings.NewReader(string(jsonData)))
 	if err != nil {
-		return fmt.Errorf("failed to create login request: %w", err)
+		return fmt.Errorf("argocd-connector: failed to create login request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to authenticate with ArgoCD API: %w", err)
+		return fmt.Errorf("argocd-connector: failed to authenticate with ArgoCD API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("argocd-connector: authentication failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// If no cookie found, try to read token from response body
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+		return fmt.Errorf("argocd-connector: failed to read response body: %w", err)
 	}
 
 	var sessionResp struct {
@@ -343,11 +343,11 @@ func (c *Client) ensureAuthenticated(ctx context.Context) error {
 	}
 
 	if err := json.Unmarshal(bodyBytes, &sessionResp); err != nil {
-		return fmt.Errorf("failed to parse session response: %w", err)
+		return fmt.Errorf("argocd-connector: failed to parse session response: %w", err)
 	}
 
 	if sessionResp.Token == "" {
-		return fmt.Errorf("session token not found in response")
+		return fmt.Errorf("argocd-connector: session token not found in response")
 	}
 
 	c.sessionToken = sessionResp.Token
@@ -374,13 +374,13 @@ func extractExpirationFromJWT(tokenString string) (time.Time, error) {
 	// JWTs are in the format: header.payload.signature
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
-		return time.Time{}, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
+		return time.Time{}, fmt.Errorf("argocd-connector: invalid JWT format: expected 3 parts, got %d", len(parts))
 	}
 
 	// Decode the payload (second part)
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
+		return time.Time{}, fmt.Errorf("argocd-connector: failed to decode JWT payload: %w", err)
 	}
 
 	// Parse the payload JSON
@@ -388,11 +388,11 @@ func extractExpirationFromJWT(tokenString string) (time.Time, error) {
 		Exp *jwt.NumericDate `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return time.Time{}, fmt.Errorf("failed to unmarshal JWT claims: %w", err)
+		return time.Time{}, fmt.Errorf("argocd-connector: failed to unmarshal JWT claims: %w", err)
 	}
 
 	if claims.Exp == nil {
-		return time.Time{}, fmt.Errorf("JWT does not contain 'exp' claim")
+		return time.Time{}, fmt.Errorf("argocd-connector: JWT does not contain 'exp' claim")
 	}
 	return time.Parse(time.RFC3339, string(claims.Exp.UTC().AppendFormat([]byte{}, "2006-01-02T15:04:05Z07:00")))
 }
@@ -409,25 +409,25 @@ func (c *Client) setAuthHeader(req *http.Request) {
 func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
 	accountsURL, err := c.buildURL(getAccountsURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build accounts URL: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to build accounts URL: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, accountsURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create accounts request: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to create accounts request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch accounts: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to fetch accounts: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to fetch accounts with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("argocd-connector: failed to fetch accounts with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// Parse the response
@@ -436,7 +436,7 @@ func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&accountsResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse accounts JSON: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to parse accounts JSON: %w", err)
 	}
 
 	return accountsResponse.Items, nil
@@ -471,7 +471,7 @@ func (c *Client) GetRBACConfigMap(ctx context.Context) (*corev1.ConfigMap, error
 				zap.Int32("code", status.Code),
 			)
 		}
-		return nil, fmt.Errorf("failed to fetch ConfigMap '%s' in namespace '%s': %w", rbacConfigMapName, argocdNamespace, err)
+		return nil, fmt.Errorf("argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s': %w", rbacConfigMapName, argocdNamespace, err)
 	}
 
 	if cm.Data == nil {
@@ -502,7 +502,7 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 	// Get role names defined in policy.csv (p, role, ...) and from grant lines (g, sub, role)
 	roleNames, err := getRoleNamesFromCSV(policyData)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse role names from policy csv: %w", err)
+		return nil, nil, fmt.Errorf("argocd-connector: failed to parse role names from policy csv: %w", err)
 	}
 
 	if okDefault && defaultPolicy != "" {
@@ -531,12 +531,12 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 	l := ctxzap.Extract(ctx)
 	cmPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s", "value": "%s"}]`, username, defaultAccountCapabilities)
 	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.JSONPatchType, []byte(cmPatch), metav1.PatchOptions{}); err != nil {
-		return nil, nil, fmt.Errorf("failed to update ConfigMap: %w", err)
+		return nil, nil, fmt.Errorf("argocd-connector: failed to update ConfigMap: %w", err)
 	}
 	l.Debug("ConfigMap updated successfully")
 	err := c.UpdateUserPassword(ctx, username, password)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to update user password: %w", err)
+		return nil, nil, fmt.Errorf("argocd-connector: failed to update user password: %w", err)
 	}
 	account := &Account{
 		Name:         username,
@@ -567,7 +567,7 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 	l := ctxzap.Extract(ctx)
 	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to get rbac configmap: %w", err)
 	}
 
 	policyCsv, ok := cm.Data[policyCSVKey]
@@ -582,7 +582,7 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 
 	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to parse policy csv: %w", err)
 	}
 
 	prefixedRoleID := roleID
@@ -631,7 +631,7 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 	records = append(records, []string{policyTypeGrant, userID, prefixedRoleID})
 
 	if err := c.updateRBACPolicy(ctx, records, ok); err != nil {
-		return nil, fmt.Errorf("failed to update rbac policy: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to update rbac policy: %w", err)
 	}
 
 	return nil, nil
@@ -641,14 +641,14 @@ func (c *Client) updateRBACPolicy(ctx context.Context, records [][]string, polic
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
 	if err := writer.WriteAll(records); err != nil {
-		return fmt.Errorf("failed to write policy csv: %w", err)
+		return fmt.Errorf("argocd-connector: failed to write policy csv: %w", err)
 	}
 
 	updatedPolicyCsv := buf.String()
 
 	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
 	if err != nil {
-		return fmt.Errorf("failed to marshal policy csv for patch: %w", err)
+		return fmt.Errorf("argocd-connector: failed to marshal policy csv for patch: %w", err)
 	}
 
 	var patch string
@@ -659,7 +659,7 @@ func (c *Client) updateRBACPolicy(ctx context.Context, records [][]string, polic
 	}
 
 	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, rbacConfigMapName, types.JSONPatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
-		return fmt.Errorf("failed to patch rbac configmap: %w", err)
+		return fmt.Errorf("argocd-connector: failed to patch rbac configmap: %w", err)
 	}
 
 	return nil
@@ -677,7 +677,7 @@ type UpdateUserPasswordRequest struct {
 func (c *Client) UpdateUserPassword(ctx context.Context, username string, password string) error {
 	updatePasswordURL, err := c.buildURL(updateUserPasswordURL)
 	if err != nil {
-		return fmt.Errorf("failed to build password update URL: %w", err)
+		return fmt.Errorf("argocd-connector: failed to build password update URL: %w", err)
 	}
 
 	// Create the request body
@@ -689,25 +689,25 @@ func (c *Client) UpdateUserPassword(ctx context.Context, username string, passwo
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
-		return fmt.Errorf("failed to marshal password update request: %w", err)
+		return fmt.Errorf("argocd-connector: failed to marshal password update request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, updatePasswordURL, strings.NewReader(string(jsonData)))
 	if err != nil {
-		return fmt.Errorf("failed to create password update request: %w", err)
+		return fmt.Errorf("argocd-connector: failed to create password update request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to update user password: %w", err)
+		return fmt.Errorf("argocd-connector: failed to update user password: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to update user password with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("argocd-connector: failed to update user password with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// Success response is empty body with 200 status
@@ -721,7 +721,7 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 	l := ctxzap.Extract(ctx)
 	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to get rbac configmap: %w", err)
 	}
 
 	policyCsv, ok := cm.Data[policyCSVKey]
@@ -736,7 +736,7 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 
 	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to parse policy csv: %w", err)
 	}
 
 	var newRecords [][]string
@@ -763,7 +763,7 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
 	if err := c.updateRBACPolicy(ctx, newRecords, ok); err != nil {
-		return nil, fmt.Errorf("failed to update rbac policy: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to update rbac policy: %w", err)
 	}
 
 	return nil, nil
@@ -774,7 +774,7 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 func (c *Client) GetRoleSubjects(ctx context.Context, roleName string) ([]string, error) {
 	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get rbac configmap: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to get rbac configmap: %w", err)
 	}
 
 	policyCsv, ok := cm.Data[policyCSVKey]
@@ -789,7 +789,7 @@ func (c *Client) GetRoleSubjects(ctx context.Context, roleName string) ([]string
 
 	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse policy csv: %w", err)
+		return nil, fmt.Errorf("argocd-connector: failed to parse policy csv: %w", err)
 	}
 
 	var subjects []string
