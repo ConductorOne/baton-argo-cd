@@ -75,7 +75,8 @@ func TestUpdateUserRole_AlreadyExists(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestUpdateUserRole_BuiltInRoleAdmin tests that admin role bypasses validation.
+// TestUpdateUserRole_BuiltInRoleAdmin tests that the built-in admin role can be granted
+// without a policy definition in argocd-rbac-cm, since ArgoCD defines it internally.
 func TestUpdateUserRole_BuiltInRoleAdmin(t *testing.T) {
 	ctx := context.Background()
 
@@ -106,7 +107,8 @@ func TestUpdateUserRole_BuiltInRoleAdmin(t *testing.T) {
 	assert.Contains(t, cm.Data["policy.csv"], "g,test-user,role:admin")
 }
 
-// TestUpdateUserRole_BuiltInRoleReadonly tests that readonly role bypasses validation.
+// TestUpdateUserRole_BuiltInRoleReadonly tests that the built-in readonly role can be granted
+// without a policy definition in argocd-rbac-cm, since ArgoCD defines it internally.
 func TestUpdateUserRole_BuiltInRoleReadonly(t *testing.T) {
 	ctx := context.Background()
 
