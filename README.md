@@ -8,7 +8,49 @@ Check out [Baton](https://github.com/conductorone/baton) to learn more the proje
 
 # Prerequisites
 
-No prerequisites were specified for `baton-argo-cd`
+## RBAC Role Requirements
+
+To grant roles to users, role definitions must exist in the `argocd-rbac-cm` ConfigMap **before** assignment.
+
+**Built-in roles** (always available):
+- `admin` - Full administrative access
+- `readonly` - Read-only access to all resources
+
+**Custom roles** must be defined before granting:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  policy.csv: |
+    # Define custom roles FIRST (policy definitions)
+    p, role:developers, applications, get, default/*, allow
+    p, role:operators, applications, *, */*, allow
+
+    # Then grants can be added (manually or via baton)
+    g, alice, role:developers
+```
+
+**Policy line format**: `p, role:<name>, resource, action, object, effect`
+
+See [ArgoCD RBAC documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/) for details.
+
+## TLS Configuration
+
+When connecting to ArgoCD instances with self-signed certificates, you have two options:
+
+**For development/testing** (insecure):
+```bash
+baton-argo-cd --insecure-skip-verify true --api-url https://argocd.local ...
+```
+
+**For production** (secure with custom CA):
+```bash
+baton-argo-cd --ca-cert-path /path/to/ca.crt --api-url https://argocd.local ...
+```
 
 # Getting Started
 

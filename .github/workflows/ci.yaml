@@ -100,7 +100,7 @@ jobs:
           set -ex
 
           echo "Starting port-forward..."
-          kubectl port-forward svc/argocd-server -n argocd 8080:80 >/dev/null 2>&1 &
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 >/dev/null 2>&1 &
           PORT_FORWARD_PID=$!
           trap "echo 'Cleaning up port-forward process...'; kill $PORT_FORWARD_PID" EXIT
 
@@ -122,7 +122,7 @@ jobs:
 
           go build -o baton-argo-cd ./cmd/baton-argo-cd
 
-          BATON_ARGS="--api-url http://127.0.0.1:8080 --username admin --password $ARGO_CD_PASSWORD --log-level debug"
+          BATON_ARGS="--api-url https://127.0.0.1:8080 --username admin --password $ARGO_CD_PASSWORD --log-level debug --insecure-skip-verify"
 
           ./baton-argo-cd $BATON_ARGS --file sync.c1z
           if [ ! -f "sync.c1z" ]; then

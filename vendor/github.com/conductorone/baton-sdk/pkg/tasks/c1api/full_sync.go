@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
+	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	v1 "github.com/conductorone/baton-sdk/pb/c1/connectorapi/baton/v1"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/session"
@@ -33,7 +34,7 @@ type fullSyncTaskHandler struct {
 	skipFullSync                        bool
 	externalResourceC1ZPath             string
 	externalResourceEntitlementIdFilter string
-	targetedSyncResourceIDs             []string
+	targetedSyncResources               []*v2.Resource
 	syncResourceTypeIDs                 []string
 }
 
@@ -57,6 +58,10 @@ func (c *fullSyncTaskHandler) sync(ctx context.Context, c1zPath string) error {
 		syncOpts = append(syncOpts, sdkSync.WithDontExpandGrants())
 	}
 
+	if resources := c.task.GetSyncFull().GetTargetedSyncResources(); len(resources) > 0 {
+		syncOpts = append(syncOpts, sdkSync.WithTargetedSyncResources(resources))
+	}
+
 	if c.task.GetSyncFull().GetSkipEntitlementsAndGrants() {
 		// Sync only resources. This is meant to be used for a first sync so initial data gets into the UI faster.
 		syncOpts = append(syncOpts, sdkSync.WithSkipEntitlementsAndGrants(true))
@@ -74,8 +79,8 @@ func (c *fullSyncTaskHandler) sync(ctx context.Context, c1zPath string) error {
 		syncOpts = append(syncOpts, sdkSync.WithSkipFullSync())
 	}
 
-	if len(c.targetedSyncResourceIDs) > 0 {
-		syncOpts = append(syncOpts, sdkSync.WithTargetedSyncResourceIDs(c.targetedSyncResourceIDs))
+	if len(c.targetedSyncResources) > 0 {
+		syncOpts = append(syncOpts, sdkSync.WithTargetedSyncResources(c.targetedSyncResources))
 	}
 	cc := c.helpers.ConnectorClient()
 
@@ -140,6 +145,7 @@ func (c *fullSyncTaskHandler) HandleTask(ctx context.Context) error {
 	c1zPath := assetFile.Name()
 	err = assetFile.Close()
 	if err != nil {
+		l.Error("failed to close asset file", zap.Error(err))
 		return c.helpers.FinishTask(ctx, nil, nil, err)
 	}
 
@@ -178,8 +184,9 @@ func (c *fullSyncTaskHandler) HandleTask(ctx context.Context) error {
 		return c.helpers.FinishTask(ctx, nil, nil, err)
 	}
 
-	err = uploadDebugLogs(ctx, c.helpers)
+	err = uploadDebugLogs(ctx, c.helpers, c.task.GetDebug())
 	if err != nil {
+		l.Error("failed to upload debug Task logs", zap.Error(err))
 		return c.helpers.FinishTask(ctx, nil, nil, err)
 	}
 
@@ -192,7 +199,7 @@ func newFullSyncTaskHandler(
 	skipFullSync bool,
 	externalResourceC1ZPath string,
 	externalResourceEntitlementIdFilter string,
-	targetedSyncResourceIDs []string,
+	targetedSyncResources []*v2.Resource,
 	syncResourceTypeIDs []string,
 ) tasks.TaskHandler {
 	return &fullSyncTaskHandler{
@@ -201,12 +208,14 @@ func newFullSyncTaskHandler(
 		skipFullSync:                        skipFullSync,
 		externalResourceC1ZPath:             externalResourceC1ZPath,
 		externalResourceEntitlementIdFilter: externalResourceEntitlementIdFilter,
-		targetedSyncResourceIDs:             targetedSyncResourceIDs,
+		targetedSyncResources:               targetedSyncResources,
 		syncResourceTypeIDs:                 syncResourceTypeIDs,
 	}
 }
 
-func uploadDebugLogs(ctx context.Context, helper fullSyncHelpers) error {
+// Check if Debug logs should be uploaded to C1 and if so do so,
+// otherwise silently return success.
+func uploadDebugLogs(ctx context.Context, helper fullSyncHelpers, deleteDebugLogs bool) error {
 	ctx, span := tracer.Start(ctx, "uploadDebugLogs")
 	defer span.End()
 
@@ -243,19 +252,27 @@ func uploadDebugLogs(ctx context.Context, helper fullSyncHelpers) error {
 
 	debugfile, err := os.Open(debugPath)
 	if err != nil {
+		l.Error("failed to open debug log file path", zap.Error(err))
 		return err
 	}
-	defer func() {
-		err := os.Remove(debugPath)
-		if err != nil {
-			l.Error("failed to delete file with debug logs", zap.Error(err), zap.String("file", debugPath))
-		}
-	}()
+	if deleteDebugLogs {
+		// We only delete the debug log when asked to,
+		// as Manager-required log files are not automatically rotated.
+		defer func() {
+			err := os.Remove(debugPath)
+			if err != nil {
+				l.Error("failed to delete file with debug logs", zap.Error(err), zap.String("file", debugPath))
+			} else {
+				l.Info("deleted debug path")
+			}
+		}()
+	}
 	defer debugfile.Close()
 
 	l.Info("uploading debug logs", zap.String("file", debugPath))
 	err = helper.Upload(ctx, debugfile)
 	if err != nil {
+		l.Error("failed to upload debug logs", zap.Error(err))
 		return err
 	}
 

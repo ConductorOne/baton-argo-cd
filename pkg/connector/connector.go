@@ -60,7 +60,15 @@ func (d *Connector) Validate(ctx context.Context) (annotations.Annotations, erro
 
 // New returns a new instance of the connector.
 func New(ctx context.Context, config *cfg.ArgoCd) (*Connector, error) {
-	cli, err := client.NewClient(ctx, config.ApiUrl, config.Username, config.Password, config.Kubeconfig)
+	cli, err := client.NewClient(
+		ctx,
+		config.ApiUrl,
+		config.Username,
+		config.Password,
+		config.Kubeconfig,
+		config.InsecureSkipVerify,
+		config.CaCertPath,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Argo CD client: %w", err)
 	}
