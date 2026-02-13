@@ -37,6 +37,7 @@ var (
 		field.WithDescription("Skip TLS certificate verification (insecure, use only for testing)"),
 		field.WithRequired(false),
 		field.WithDisplayName("Skip TLS Verification"),
+		field.WithExportTarget(field.ExportTargetCLIOnly),
 	)
 	CACertPathField = field.FileUploadField(
 		"ca-cert-path",
