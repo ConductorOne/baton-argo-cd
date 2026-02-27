@@ -321,7 +321,7 @@ func (c *Client) ensureAuthenticated(ctx context.Context) error {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // G107: URL is constructed from admin-configured base URL and a constant path, not user input.
 	if err != nil {
 		return fmt.Errorf("argocd-connector: failed to authenticate with ArgoCD API: %w", err)
 	}
@@ -419,7 +419,7 @@ func (c *Client) GetAccounts(ctx context.Context) ([]*Account, error) {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // G107: URL is constructed from admin-configured base URL and a constant path, not user input.
 	if err != nil {
 		return nil, fmt.Errorf("argocd-connector: failed to fetch accounts: %w", err)
 	}
@@ -699,7 +699,7 @@ func (c *Client) UpdateUserPassword(ctx context.Context, username string, passwo
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // G107: URL is constructed from admin-configured base URL and a constant path, not user input.
 	if err != nil {
 		return fmt.Errorf("argocd-connector: failed to update user password: %w", err)
 	}
