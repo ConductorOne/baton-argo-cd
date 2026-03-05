@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -88,20 +89,25 @@ type WrapperOption interface {
 }
 
 // Keep a handle on all caches so we can clear them later.
-var caches []icache
+var (
+	caches    []icache
+	cachesMtx sync.RWMutex
+)
 
 func ClearCaches(ctx context.Context) error {
 	l := ctxzap.Extract(ctx)
 	l.Debug("clearing caches")
-	var err error
+	var errs []error
+	cachesMtx.RLock()
+	defer cachesMtx.RUnlock()
 	for _, cache := range caches {
 		l.Debug("clearing cache", zap.String("cache", fmt.Sprintf("%T", cache)), zap.Any("stats", cache.Stats(ctx)))
-		err = cache.Clear(ctx)
+		err := cache.Clear(ctx)
 		if err != nil {
-			err = errors.Join(err, err)
+			errs = append(errs, err)
 		}
 	}
-	return err
+	return errors.Join(errs...)
 }
 
 type (
@@ -143,7 +149,9 @@ func NewBaseHttpClientWithContext(ctx context.Context, httpClient *http.Client, 
 		baseHttpCache: cache,
 	}
 
+	cachesMtx.Lock()
 	caches = append(caches, cache)
+	cachesMtx.Unlock()
 
 	for _, opt := range opts {
 		opt.Apply(cli)
@@ -316,16 +324,15 @@ func WithGenericResponse(response *map[string]any) DoOption {
 		}
 
 		if IsXMLContentType(resp.Header.Get(ContentType)) {
-			err = WithXMLResponse(response)(resp)
+			var xm xmlMap
+			err = WithXMLResponse(&xm)(resp)
 			if err != nil {
 				return err
 			}
-			if list, ok := v.([]any); ok {
-				(*response)["items"] = list
-			} else if vMap, ok := v.(map[string]any); ok {
+			if vMap, ok := xm.data.(map[string]any); ok {
 				*response = vMap
 			} else {
-				return status.Errorf(codes.Internal, "unsupported content type: %T", v)
+				return status.Errorf(codes.Internal, "unsupported XML structure: %T", xm.data)
 			}
 			return nil
 		}
@@ -403,6 +410,7 @@ func (c *BaseHttpClient) Do(req *http.Request, options ...DoOption) (*http.Respo
 	}
 
 	if resp == nil {
+		//nolint:gosec // this HTTP wrapper intentionally supports arbitrary connector-defined endpoints.
 		resp, err = c.HttpClient.Do(req)
 		if err != nil {
 			l.Error("base-http-client: HTTP error response", zap.Error(err))
