@@ -35,7 +35,7 @@ const (
 type Compactor struct {
 	compactorType CompactorType
 	entries       []*CompactableSync
-	compactedC1z  *dotc1z.C1File
+	compactedC1z  dotc1z.C1ZStore
 
 	tmpDir             string
 	destDir            string
@@ -255,6 +255,11 @@ func (c *Compactor) Compact(ctx context.Context) (*CompactableSync, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand grants: %w", err)
 		}
+		// expandGrants internally wraps the compactedC1z in a syncer whose
+		// Close() closes the store. Clear our pointer so the deferred Close
+		// at the top of Compact doesn't call Close a second time. Close is
+		// idempotent today, but this keeps the ownership handoff explicit.
+		c.compactedC1z = nil
 	}
 
 	// Move last compacted file to the destination dir
@@ -292,12 +297,30 @@ func cpFile(ctx context.Context, sourcePath string, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create destination file: %w", err)
 	}
-	defer destination.Close()
+	destinationClosed := false
+	defer func() {
+		if !destinationClosed {
+			_ = destination.Close()
+		}
+	}()
 
 	_, err = io.Copy(destination, source)
 	if err != nil {
 		return fmt.Errorf("failed to copy file: %w", err)
 	}
+
+	// Sync + Close + err-check so write-back failures (out-of-disk,
+	// IO error, quota exhaustion) surface here rather than being
+	// silently discarded by the deferred Close after the function
+	// has reported success. Required because the compacted file is
+	// the canonical artifact downstream consumers read.
+	if err := destination.Sync(); err != nil {
+		return fmt.Errorf("failed to sync destination file: %w", err)
+	}
+	if err := destination.Close(); err != nil {
+		return fmt.Errorf("failed to close destination file: %w", err)
+	}
+	destinationClosed = true
 
 	return nil
 }
@@ -331,7 +354,10 @@ func (c *Compactor) doOneCompaction(ctx context.Context, cs *CompactableSync) er
 		}
 	}()
 
-	runner := attached.NewAttachedCompactor(c.compactedC1z, applyFile)
+	runner, err := attached.NewAttachedCompactor(c.compactedC1z, applyFile)
+	if err != nil {
+		return fmt.Errorf("failed to create attached compactor: %w", err)
+	}
 	if err := runner.Compact(ctx); err != nil {
 		l.Error("error running compaction", zap.Error(err), zap.String("apply_file", cs.FilePath))
 		return err
