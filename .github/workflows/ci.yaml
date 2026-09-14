@@ -91,10 +91,7 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
       - name: Install baton
-        run: |
-          chmod +x ./scripts/get-baton.sh
-          ./scripts/get-baton.sh
-          sudo mv baton /usr/local/bin/
+        uses: ConductorOne/github-workflows/actions/get-baton@v4
       - name: Run Grant and Revoke Tests
         run: |
           set -ex
