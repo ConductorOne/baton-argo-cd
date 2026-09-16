@@ -547,8 +547,8 @@ func TestCreateAccount_ClearsStaleEnabledFlag(t *testing.T) {
 }
 
 // TestCreateAccount_RejectsInvalidAccountName verifies the create path validates account names
-// with the same rules as the deprovision path, so a name cannot break out of the JSON Patch
-// document or collide with another account's suffix namespace.
+// with the same rules as the deprovision path, so a name cannot collide with another account's
+// suffix namespace -- `accounts.alice.enabled` is alice's enabled flag, not an account.
 func TestCreateAccount_RejectsInvalidAccountName(t *testing.T) {
 	ctx := context.Background()
 	for _, username := range []string{"", "alice.enabled", `alice", "x": "y`, "alice bob", "alice/../bob"} {
@@ -601,8 +601,9 @@ func TestDeprovision_RejectsDottedAccountName(t *testing.T) {
 
 // TestCreateAccount_NilConfigMapData verifies an account can be created when argocd-cm has no
 // `data` map at all -- the state of Argo CD's upstream install manifests, and therefore of any
-// cluster with no local accounts yet. A JSON Patch `add` needs its parent container to exist, so
-// the missing `data` object has to be created in the same patch.
+// cluster with no local accounts yet. The merge patch creates the container implicitly; do not
+// reintroduce a JSON Patch here, whose `add` would require the parent to already exist and would
+// need a read-modify-write to know whether it does.
 func TestCreateAccount_NilConfigMapData(t *testing.T) {
 	ctx := context.Background()
 	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(nil))
