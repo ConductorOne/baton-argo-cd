@@ -111,6 +111,7 @@ When deploying the connector in the same Kubernetes cluster and namespace as Arg
        verbs: ["get", "list", "patch", "update"]
      - apiGroups: [""]
        resources: ["secrets"]
+       resourceNames: ["argocd-secret"]
        verbs: ["get", "patch"]
    ```
 

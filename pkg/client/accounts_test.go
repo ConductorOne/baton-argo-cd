@@ -513,3 +513,88 @@ func TestMarshalJSONPatch(t *testing.T) {
 	require.Len(t, ops, 1)
 	assert.Equal(t, "false", ops[0]["value"])
 }
+
+// TestCreateAccount_ClearsStaleEnabledFlag verifies that re-provisioning an account that was
+// previously deprovisioned in `disable` mode clears the leftover `accounts.<name>.enabled: false`
+// key. Argo CD treats an account as enabled only when the key is absent, so leaving it behind
+// would produce an account that cannot authenticate even though provisioning reported success.
+func TestCreateAccount_ClearsStaleEnabledFlag(t *testing.T) {
+	ctx := context.Background()
+	k8sClient := fake.NewSimpleClientset(
+		newArgoCDConfigMap(map[string]string{
+			"accounts.leaver":         "apiKey, login",
+			"accounts.leaver.enabled": "false",
+			"accounts.bob.enabled":    "false",
+		}),
+		newArgoCDSecret(map[string][]byte{}),
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":"t"}`))
+	}))
+	defer srv.Close()
+
+	cli := newTestClient(k8sClient, srv.URL, srv.Client())
+	_, _, err := cli.CreateAccount(ctx, "leaver", "new-password")
+	require.NoError(t, err)
+
+	data := getConfigMapData(t, k8sClient)
+	assert.NotContains(t, data, "accounts.leaver.enabled", "stale disabled flag must be cleared")
+	assert.Equal(t, "apiKey, login", data["accounts.leaver"])
+	// A different account's flag is left alone.
+	assert.Equal(t, "false", data["accounts.bob.enabled"])
+}
+
+// TestCreateAccount_RejectsInvalidAccountName verifies the create path validates account names
+// with the same rules as the deprovision path, so a name cannot break out of the JSON Patch
+// document or collide with another account's suffix namespace.
+func TestCreateAccount_RejectsInvalidAccountName(t *testing.T) {
+	ctx := context.Background()
+	for _, username := range []string{"", "alice.enabled", `alice", "x": "y`, "alice bob", "alice/../bob"} {
+		t.Run(username, func(t *testing.T) {
+			k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
+				"accounts.alice.enabled": "false",
+			}))
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+
+			_, _, err := cli.CreateAccount(ctx, username, "pw")
+			require.Error(t, err)
+			// The store is unchanged.
+			assert.Equal(t, "false", getConfigMapData(t, k8sClient)["accounts.alice.enabled"])
+		})
+	}
+}
+
+// TestDeprovision_RejectsDottedAccountName verifies that a dotted name is refused on every
+// deprovision path. Argo CD splits `accounts.*` keys on "." and only accepts two- and three-part
+// keys, so no real account name contains a dot -- and accepting one would let `alice.enabled`
+// address the *enabled flag* of the separate account `alice`.
+func TestDeprovision_RejectsDottedAccountName(t *testing.T) {
+	ctx := context.Background()
+
+	for _, username := range []string{"alice.enabled", "john.smith", "admin.enabled", ".", "alice."} {
+		t.Run(username, func(t *testing.T) {
+			k8sClient := fake.NewSimpleClientset(
+				newArgoCDConfigMap(map[string]string{
+					"accounts.alice":         "apiKey, login",
+					"accounts.alice.enabled": "false",
+				}),
+				newArgoCDSecret(map[string][]byte{
+					"accounts.alice.password": []byte("$2a$10$hash"),
+				}),
+			)
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+
+			require.Error(t, cli.DisableAccount(ctx, username))
+			require.Error(t, cli.DeleteAccount(ctx, username))
+			require.Error(t, cli.PurgeAccountCredentials(ctx, username))
+			require.Error(t, cli.RevokeAccountTokens(ctx, username))
+
+			// Nothing was written: the disabled account keeps its flag and its credentials.
+			data := getConfigMapData(t, k8sClient)
+			assert.Equal(t, "apiKey, login", data["accounts.alice"])
+			assert.Equal(t, "false", data["accounts.alice.enabled"])
+		})
+	}
+}

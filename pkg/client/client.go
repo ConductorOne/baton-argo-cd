@@ -529,13 +529,50 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 
 func (c *Client) CreateAccount(ctx context.Context, username string, password string) (*Account, annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
-	cmPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s", "value": "%s"}]`, username, defaultAccountCapabilities)
-	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.JSONPatchType, []byte(cmPatch), metav1.PatchOptions{}); err != nil {
+
+	if err := validateAccountName(username); err != nil {
+		return nil, nil, err
+	}
+
+	accountKey := accountKeyPrefix + username
+	enabledKey := accountKey + accountEnabledSuffix
+
+	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s': %w",
+			argoCDConfigMapName, argocdNamespace, err,
+		)
+	}
+
+	capabilities := defaultAccountCapabilities
+	ops := []jsonPatchOperation{{
+		Op:    jsonPatchOpAdd,
+		Path:  dataKeyPath(accountKey),
+		Value: &capabilities,
+	}}
+
+	// A re-provisioned account may still carry `accounts.<name>.enabled: "false"` from a
+	// previous `disable` deprovision. Argo CD treats the account as enabled only when the key
+	// is absent, so leaving it behind yields an account that cannot authenticate even though
+	// provisioning reported success.
+	if _, hasEnabled := cm.Data[enabledKey]; hasEnabled {
+		ops = append(ops, jsonPatchOperation{
+			Op:   jsonPatchOpRemove,
+			Path: dataKeyPath(enabledKey),
+		})
+	}
+
+	cmPatch, err := marshalJSONPatch(ops)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.JSONPatchType, cmPatch, metav1.PatchOptions{}); err != nil {
 		return nil, nil, fmt.Errorf("argocd-connector: failed to update ConfigMap: %w", err)
 	}
 	l.Debug("ConfigMap updated successfully")
-	err := c.UpdateUserPassword(ctx, username, password)
-	if err != nil {
+	if err := c.UpdateUserPassword(ctx, username, password); err != nil {
 		return nil, nil, fmt.Errorf("argocd-connector: failed to update user password: %w", err)
 	}
 	account := &Account{
