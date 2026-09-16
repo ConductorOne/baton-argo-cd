@@ -53,7 +53,8 @@ var (
 		field.WithDescription(
 			"How to deprovision an Argo CD local account: 'disable' keeps the account entry in argocd-cm and sets "+
 				"accounts.<name>.enabled=false (reversible, preserves audit identity), 'delete' removes the account entry "+
-				"outright. Stored credentials (password entry and API tokens) are purged in both modes.",
+				"outright. Stored credentials (password entry and API tokens) are purged in both modes. "+
+				"The value is case-sensitive and must be exactly 'disable' or 'delete'.",
 		),
 		field.WithDefaultValue(string(client.DeprovisionModeDisable)),
 		field.WithRequired(false),

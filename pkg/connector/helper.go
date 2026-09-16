@@ -30,16 +30,26 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 		"tokens":       tokensStr,
 	}
 
-	accountTraits := []resource.UserTraitOption{
-		resource.WithUserProfile(profile),
-	}
-
 	// An unset status defaults to enabled in the SDK, which would report a deprovisioned
 	// account as active: `disable` mode leaves the account in argocd-cm with
 	// accounts.<name>.enabled=false, so it keeps syncing and must carry its real state.
-	status := v2.Status_RESOURCE_STATUS_ENABLED
+	//
+	// Both the resource-level status and the user trait's own status are set. The trait field
+	// is deprecated in favour of the resource attribute, but NewUserTrait defaults an unset
+	// trait status to enabled independently of the resource status, so setting only the
+	// resource attribute would leave the two contradicting each other.
+	traitStatus := v2.UserTrait_Status_STATUS_ENABLED
+	resourceStatus := v2.Status_RESOURCE_STATUS_ENABLED
 	if !account.Enabled {
-		status = v2.Status_RESOURCE_STATUS_DISABLED
+		traitStatus = v2.UserTrait_Status_STATUS_DISABLED
+		resourceStatus = v2.Status_RESOURCE_STATUS_DISABLED
+	}
+
+	accountTraits := []resource.UserTraitOption{
+		resource.WithUserProfile(profile),
+		//nolint:staticcheck // deprecated, but the trait status still has readers and the SDK
+		// itself keeps writing it for the same backwards-compatibility reason.
+		resource.WithStatus(traitStatus),
 	}
 
 	return resource.NewUserResource(
@@ -47,7 +57,7 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 		userResourceType,
 		account.Name,
 		accountTraits,
-		resource.WithResourceStatus(status, ""),
+		resource.WithResourceStatus(resourceStatus, ""),
 	)
 }
 

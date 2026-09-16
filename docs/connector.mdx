@@ -46,6 +46,10 @@ Notes and limitations:
   deprovision in ArgoCD itself.
 - Deprovisioning is idempotent: an account that is already disabled, already deleted, or has no
   stored credentials is reported as successfully deprovisioned.
+- Account names may contain only alphanumerics, `-` and `_`. ArgoCD splits `accounts.*` keys in
+  `argocd-cm` on `.`, so a dotted name is not addressable as an account — `accounts.john.smith`
+  is parsed as a `smith` property of an account named `john`. Provisioning and deprovisioning
+  both reject such names rather than writing a key ArgoCD would silently ignore.
 - Deprovisioning requires the `secrets` Kubernetes permissions described below, in addition to the
   `configmaps` permissions used for sync and provisioning.
 

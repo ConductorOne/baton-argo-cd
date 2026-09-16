@@ -72,6 +72,10 @@ var ErrAccountNotFound = errors.New("argocd-connector: account not found")
 
 // ParseDeprovisionMode normalizes a configured deprovision mode. An empty value selects the
 // default, `disable`.
+//
+// The config field carries an exact-match `in` rule, so a non-canonical spelling is rejected at
+// config validation before it reaches here. The normalization below is a backstop for callers
+// that construct a mode without going through field validation, not a documented tolerance.
 func ParseDeprovisionMode(value string) (DeprovisionMode, error) {
 	switch mode := DeprovisionMode(strings.ToLower(strings.TrimSpace(value))); mode {
 	case "":
@@ -89,9 +93,11 @@ func ParseDeprovisionMode(value string) (DeprovisionMode, error) {
 // jsonPatchOperation is a single RFC 6902 operation. Building patches through this type (rather
 // than string formatting) keeps account names from breaking out of the JSON document.
 type jsonPatchOperation struct {
-	Op    string  `json:"op"`
-	Path  string  `json:"path"`
-	Value *string `json:"value,omitempty"`
+	Op   string `json:"op"`
+	Path string `json:"path"`
+	// Value is omitted for `remove`, which the Kubernetes API rejects when it is present.
+	// It is `any` rather than `string` so a patch can create a missing `data` container.
+	Value any `json:"value,omitempty"`
 }
 
 // marshalJSONPatch serializes operations into a JSON Patch document.
@@ -321,11 +327,10 @@ func (c *Client) DisableAccount(ctx context.Context, username string) error {
 		op = jsonPatchOpReplace
 	}
 
-	disabled := accountDisabledValue
 	patch, err := marshalJSONPatch([]jsonPatchOperation{{
 		Op:    op,
 		Path:  dataKeyPath(enabledKey),
-		Value: &disabled,
+		Value: accountDisabledValue,
 	}})
 	if err != nil {
 		return err
