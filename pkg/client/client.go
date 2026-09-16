@@ -545,12 +545,24 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 		)
 	}
 
-	capabilities := defaultAccountCapabilities
-	ops := []jsonPatchOperation{{
+	var ops []jsonPatchOperation
+
+	// JSON Patch `add` needs its parent container to exist, and Argo CD's upstream install
+	// manifests ship argocd-cm with no `data` map at all - the state of any cluster that has
+	// no local accounts yet. Create the container first in that case.
+	if cm.Data == nil {
+		ops = append(ops, jsonPatchOperation{
+			Op:    jsonPatchOpAdd,
+			Path:  "/data",
+			Value: map[string]string{},
+		})
+	}
+
+	ops = append(ops, jsonPatchOperation{
 		Op:    jsonPatchOpAdd,
 		Path:  dataKeyPath(accountKey),
-		Value: &capabilities,
-	}}
+		Value: defaultAccountCapabilities,
+	})
 
 	// A re-provisioned account may still carry `accounts.<name>.enabled: "false"` from a
 	// previous `disable` deprovision. Argo CD treats the account as enabled only when the key

@@ -15,12 +15,23 @@ import (
 // therefore still syncing -- would keep reporting the leaver as an active account.
 func TestParseAccountResource_Status(t *testing.T) {
 	tests := []struct {
-		name    string
-		enabled bool
-		want    v2.Status_ResourceStatus
+		name      string
+		enabled   bool
+		want      v2.Status_ResourceStatus
+		wantTrait v2.UserTrait_Status_Status
 	}{
-		{name: "enabled account", enabled: true, want: v2.Status_RESOURCE_STATUS_ENABLED},
-		{name: "disabled account", enabled: false, want: v2.Status_RESOURCE_STATUS_DISABLED},
+		{
+			name:      "enabled account",
+			enabled:   true,
+			want:      v2.Status_RESOURCE_STATUS_ENABLED,
+			wantTrait: v2.UserTrait_Status_STATUS_ENABLED,
+		},
+		{
+			name:      "disabled account",
+			enabled:   false,
+			want:      v2.Status_RESOURCE_STATUS_DISABLED,
+			wantTrait: v2.UserTrait_Status_STATUS_DISABLED,
+		},
 	}
 
 	for _, tt := range tests {
@@ -33,6 +44,15 @@ func TestParseAccountResource_Status(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.want, res.GetStatus().GetStatus())
+
+			// The deprecated trait status must agree with the resource status: the SDK
+			// defaults an unset trait status to enabled independently of the resource
+			// attribute, so a disabled account would otherwise contradict itself.
+			var trait v2.UserTrait
+			require.NoError(t, res.GetAnnotations()[0].UnmarshalTo(&trait))
+			//nolint:staticcheck // asserting the deprecated trait status is the point of this test
+			assert.Equal(t, tt.wantTrait, trait.GetStatus().GetStatus())
+
 			// The profile keeps carrying the raw value for display.
 			assert.Equal(t, tt.enabled, res.GetProfile().GetFields()["enabled"].GetBoolValue())
 		})

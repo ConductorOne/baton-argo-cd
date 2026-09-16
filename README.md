@@ -107,6 +107,14 @@ rules:
 The Argo CD account used by the connector also needs the `accounts, update` RBAC permission to
 revoke API tokens.
 
+### Account names
+
+Account names may contain only alphanumerics, `-` and `_`. Argo CD stores each local account as
+an `accounts.<name>` key in `argocd-cm` and splits those keys on `.`, so a name containing a dot
+is not addressable as an account — `accounts.john.smith` is parsed as a `smith` property of an
+account named `john`. Provisioning and deprovisioning both reject such names outright rather than
+writing a key Argo CD would silently ignore.
+
 ## TLS Configuration
 
 When connecting to ArgoCD instances with self-signed certificates, you have two options:

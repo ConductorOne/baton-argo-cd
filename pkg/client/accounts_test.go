@@ -598,3 +598,25 @@ func TestDeprovision_RejectsDottedAccountName(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateAccount_NilConfigMapData verifies an account can be created when argocd-cm has no
+// `data` map at all -- the state of Argo CD's upstream install manifests, and therefore of any
+// cluster with no local accounts yet. A JSON Patch `add` needs its parent container to exist, so
+// the missing `data` object has to be created in the same patch.
+func TestCreateAccount_NilConfigMapData(t *testing.T) {
+	ctx := context.Background()
+	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(nil))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":"t"}`))
+	}))
+	defer srv.Close()
+
+	cli := newTestClient(k8sClient, srv.URL, srv.Client())
+	account, _, err := cli.CreateAccount(ctx, "first-account", "pw")
+	require.NoError(t, err)
+	require.NotNil(t, account)
+
+	assert.Equal(t, "apiKey, login", getConfigMapData(t, k8sClient)["accounts.first-account"])
+}
