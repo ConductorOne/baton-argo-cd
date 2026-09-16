@@ -38,6 +38,68 @@ data:
 
 See [ArgoCD RBAC documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/) for details.
 
+## Account Deprovisioning
+
+The connector deprovisions Argo CD **local accounts** (`accounts.*` entries in `argocd-cm`).
+Argo CD's Account API has no delete or disable endpoint and `Account.enabled` is read-only over
+the API, so the account entry is changed through the Kubernetes API
+(see [argoproj/argo-cd#4967](https://github.com/argoproj/argo-cd/issues/4967)).
+
+Deprovisioning an account performs three steps:
+
+1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
+2. Disables or deletes the account entry in `argocd-cm`, per `--deprovision-mode`.
+3. Purges the account's stored credentials - password hash, password mtime marker, and token
+   records - from the `argocd-secret` Secret, so no residual access path survives the account
+   (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
+
+`--deprovision-mode` controls step 2:
+
+| Mode | Behavior |
+|------|----------|
+| `disable` (default) | Sets `accounts.<name>.enabled: "false"`. Reversible and preserves the account's audit identity. Accounts are enabled when the key is absent, so it is added when missing. |
+| `delete` | Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`. |
+
+```bash
+# Default: disable the account, keeping the entry for audit purposes
+baton-argo-cd --api-url https://argocd.local --username admin --password ...   --deprovision-mode disable
+
+# Remove the account entry outright
+baton-argo-cd --api-url https://argocd.local --username admin --password ...   --deprovision-mode delete
+```
+
+Notes and limitations:
+
+- The built-in `admin` account is **not** deprovisionable: it is controlled by the top-level
+  `admin.enabled` key in `argocd-cm`, not by `accounts.*`. Deprovisioning it is rejected.
+- SSO/Dex-managed identities are not local accounts, so there is nothing to deprovision for them
+  in Argo CD itself.
+- Because credentials are purged in both modes, re-enabling a disabled account requires setting a
+  new password.
+- Deprovisioning is idempotent: an account that is already disabled, already deleted, or has no
+  stored credentials is reported as successfully deprovisioned.
+- Argo CD picks up `argocd-cm` changes through its settings watcher. If your deployment has that
+  watcher disabled, restart `argocd-server` (`kubectl rollout restart deployment argocd-server -n argocd`)
+  for the change to take effect.
+
+### Kubernetes permissions
+
+Deprovisioning needs `get` and `patch` on the `argocd-secret` Secret in addition to the ConfigMap
+permissions used by sync and provisioning:
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+```
+
+The Argo CD account used by the connector also needs the `accounts, update` RBAC permission to
+revoke API tokens.
+
 ## TLS Configuration
 
 When connecting to ArgoCD instances with self-signed certificates, you have two options:
@@ -87,7 +149,8 @@ baton resources
 - Users
 - Roles
 
-This connector supports account provisioning for users and entitlement provisioning for roles.
+This connector supports account provisioning and deprovisioning for users, and entitlement
+provisioning for roles.
 
 # Contributing, Support and Issues
 
@@ -116,6 +179,7 @@ Flags:
       --username  string             The username used to authenticate with Argo CD
       --password  string             The password used to authenticate with Argo CD
       --api-url   string             The API URL
+      --deprovision-mode string      How to deprovision a local account: disable or delete (default "disable")
       --client-id string             The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string         The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
   -f, --file string                  The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")

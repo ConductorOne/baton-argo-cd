@@ -3,8 +3,10 @@ package config
 import (
 	"testing"
 
+	"github.com/conductorone/baton-argo-cd/pkg/client"
 	"github.com/conductorone/baton-sdk/pkg/field"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestValidateConfig tests the validation of the ArgoCD configuration.
@@ -44,6 +46,26 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "valid config - disable deprovision mode",
+			config: &ArgoCd{
+				Username:        "admin",
+				Password:        "test-password",
+				ApiUrl:          "https://test.com",
+				DeprovisionMode: string(client.DeprovisionModeDisable),
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid config - delete deprovision mode",
+			config: &ArgoCd{
+				Username:        "admin",
+				Password:        "test-password",
+				ApiUrl:          "https://test.com",
+				DeprovisionMode: string(client.DeprovisionModeDelete),
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -56,4 +78,16 @@ func TestValidateConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDeprovisionModeFieldDefault verifies the deprovision mode defaults to the reversible
+// `disable` behaviour, so an operator who never configures the field does not get hard deletes.
+func TestDeprovisionModeFieldDefault(t *testing.T) {
+	assert.Equal(t, "deprovision-mode", DeprovisionModeField.FieldName)
+	assert.False(t, DeprovisionModeField.Required)
+	assert.Equal(t, string(client.DeprovisionModeDisable), DeprovisionModeField.DefaultValue)
+
+	mode, err := client.ParseDeprovisionMode(DeprovisionModeField.DefaultValue.(string))
+	require.NoError(t, err)
+	assert.Equal(t, client.DeprovisionModeDisable, mode)
 }
