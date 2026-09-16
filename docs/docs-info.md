@@ -8,6 +8,12 @@ While developing the connector, please fill out this form. This information is n
 
 2. Can the connector provision any resources? If so, which ones?
    > Yes, the connector can provision user accounts and manage role assignments (entitlements) for users.
+   >
+   > It can also deprovision ArgoCD local accounts. Deprovisioning revokes the account's issued API
+   > tokens, disables (default) or deletes its `accounts.<name>` entry in `argocd-cm` depending on the
+   > configured deprovisioning mode, and purges its stored credentials from `argocd-secret`. The
+   > built-in `admin` account is not deprovisionable, and SSO/Dex identities are not local accounts so
+   > there is nothing to deprovision for them.
 
 ## Connector credentials
 
@@ -41,6 +47,7 @@ While developing the connector, please fill out this form. This information is n
      > - List and get users and roles.
 
    * - Create new user accounts.
+   * - Deprovision (disable or delete) local user accounts and revoke their API tokens.
    * - Manage role assignments for users (updating user-role mappings).
        > The built-in `admin` role has all the necessary permissions. If creating a custom role, ensure it has the appropriate permissions for `users` and `roles` resources as described in the [ArgoCD RBAC documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/).
 
@@ -50,6 +57,7 @@ While developing the connector, please fill out this form. This information is n
      >
      > - **Sync (Read-only)**: Requires permissions to `get` and `list` users and roles.
      > - **Provision (Read-Write)**: Requires all read permissions, plus permissions to `create` users and `update` user-role assignments.
+     > - **Deprovision (Read-Write)**: Requires all provision permissions, plus `accounts, update` in ArgoCD RBAC (to revoke API tokens) and Kubernetes `get`/`patch` on the `argocd-secret` Secret (to purge stored credentials).
 
    - What level of access or permissions does the user need in order to create the credentials? (For example, must be a super administrator, must have access to the admin console, etc.)
      > To create a user with the necessary permissions in ArgoCD, you need to be an administrator of the ArgoCD instance. This is typically done by logging in as the `admin` user or another user with equivalent administrative privileges.
@@ -86,9 +94,10 @@ When deploying the connector in the same Kubernetes cluster and namespace as Arg
 
 2. **Create a Role with Required Permissions**
 
-   The connector needs permissions to read and modify ArgoCD ConfigMaps. Create a Role that grants access to the following ConfigMaps:
-   - `argocd-rbac-cm`: Contains RBAC policies and role grants (needs read and write access)
-   - `argocd-cm`: Contains ArgoCD configuration including user accounts (needs write access for provisioning)
+   The connector needs permissions to read and modify ArgoCD ConfigMaps, and to read and patch the ArgoCD Secret. Create a Role that grants access to the following objects:
+   - `argocd-rbac-cm` ConfigMap: Contains RBAC policies and role grants (needs read and write access)
+   - `argocd-cm` ConfigMap: Contains ArgoCD configuration including user accounts (needs write access for provisioning and deprovisioning)
+   - `argocd-secret` Secret: Contains local accounts' password hashes and API token records (needs read and write access for deprovisioning)
 
    ```yaml
    apiVersion: rbac.authorization.k8s.io/v1
@@ -100,6 +109,9 @@ When deploying the connector in the same Kubernetes cluster and namespace as Arg
      - apiGroups: [""]
        resources: ["configmaps"]
        verbs: ["get", "list", "patch", "update"]
+     - apiGroups: [""]
+       resources: ["secrets"]
+       verbs: ["get", "patch"]
    ```
 
    **Required Permissions Explained:**
@@ -107,6 +119,7 @@ When deploying the connector in the same Kubernetes cluster and namespace as Arg
    - `list`: List ConfigMaps in the namespace (required to discover and access the ConfigMaps)
    - `patch`: Partially update ConfigMaps (used to modify RBAC policies and user accounts)
    - `update`: Fully update ConfigMaps (used as an alternative to patch for modifying ConfigMaps)
+   - `get`/`patch` on `secrets`: Read and purge a deprovisioned account's stored credentials (password hash and API token records) in `argocd-secret`. Only needed for account deprovisioning.
 
    Apply with:
    ```bash
@@ -211,6 +224,10 @@ kubectl auth can-i patch configmaps/argocd-rbac-cm -n argocd --as=system:service
 
 # Check if the ServiceAccount can update the ArgoCD ConfigMap
 kubectl auth can-i patch configmaps/argocd-cm -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
+
+# Check if the ServiceAccount can read and update the ArgoCD Secret (account deprovisioning)
+kubectl auth can-i get secrets/argocd-secret -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
+kubectl auth can-i patch secrets/argocd-secret -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
 ```
 
 All commands should return `yes` if the permissions are correctly configured.

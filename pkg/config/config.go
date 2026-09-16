@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/conductorone/baton-argo-cd/pkg/client"
 	"github.com/conductorone/baton-sdk/pkg/field"
 )
 
@@ -47,8 +48,21 @@ var (
 		field.WithIsSecret(true),
 		field.WithDisplayName("CA Certificate"),
 	)
+	DeprovisionModeField = field.StringField(
+		"deprovision-mode",
+		field.WithDescription(
+			"How to deprovision an Argo CD local account: 'disable' keeps the account entry in argocd-cm and sets "+
+				"accounts.<name>.enabled=false (reversible, preserves audit identity), 'delete' removes the account entry "+
+				"outright. Stored credentials (password entry and API tokens) are purged in both modes.",
+		),
+		field.WithDefaultValue(string(client.DeprovisionModeDisable)),
+		field.WithRequired(false),
+		field.WithDisplayName("Account deprovisioning mode"),
+		field.WithPlaceholder(string(client.DeprovisionModeDisable)),
+	)
 	ConfigurationFields = []field.SchemaField{
 		UsernameField, PasswordField, ApiUrlField, KubeconfigPathField, InsecureSkipVerifyField, CACertPathField,
+		DeprovisionModeField,
 	}
 	FieldRelationships = []field.SchemaFieldRelationship{
 		field.FieldsRequiredTogether(UsernameField, PasswordField),
