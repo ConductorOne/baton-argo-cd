@@ -30,12 +30,21 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 		"tokens":       tokensStr,
 	}
 
+	// An unset status defaults to enabled in the SDK, which would report a deprovisioned
+	// account as active: `disable` mode leaves the account in argocd-cm with
+	// accounts.<name>.enabled=false, so it keeps syncing and must carry its real state.
+	status := v2.Status_RESOURCE_STATUS_ENABLED
+	if !account.Enabled {
+		status = v2.Status_RESOURCE_STATUS_DISABLED
+	}
+
 	return resource.NewUserResource(
 		account.Name,
 		userResourceType,
 		account.Name,
 		nil,
 		resource.WithResourceProfile(profile),
+		resource.WithResourceStatus(status, ""),
 	)
 }
 

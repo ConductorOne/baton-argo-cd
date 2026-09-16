@@ -11,8 +11,11 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "patch", "update"]
   # Permissions to purge a deprovisioned account's stored credentials
-  # (accounts.<name>.password / .passwordMtime / .tokens) from argocd-secret
+  # (accounts.<name>.password / .passwordMtime / .tokens) from argocd-secret.
+  # Scoped by name: the connector only ever reads and patches argocd-secret, and the
+  # argocd namespace also holds repository and cluster credentials that it must not see.
   - apiGroups: [""]
     resources: ["secrets"]
+    resourceNames: ["argocd-secret"]
     verbs: ["get", "patch"]
 

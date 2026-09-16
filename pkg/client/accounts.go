@@ -57,10 +57,15 @@ const (
 	jsonPatchOpRemove  = "remove"
 )
 
-// accountNameRegexp mirrors the Kubernetes ConfigMap/Secret key charset. Every Argo CD local
-// account name is embedded in such a key, so anything outside this charset cannot name a real
-// account - and rejecting it keeps account names out of the JSON Patch path unescaped.
-var accountNameRegexp = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+// accountNameRegexp is the Argo CD local-account name charset, which is narrower than the
+// Kubernetes ConfigMap/Secret key charset it is embedded in. Argo CD splits every `accounts.*`
+// key on "." and only accepts two-part (`accounts.<name>`) and three-part
+// (`accounts.<name>.<suffix>`) keys, so a real account name can never contain a dot. Rejecting
+// "." therefore excludes no legitimate account, and it keeps a name from colliding with another
+// account's suffix namespace - `accounts.` + "alice.enabled" is alice's enabled flag, not an
+// account named "alice.enabled". It also keeps account names out of the JSON Patch path
+// unescaped.
+var accountNameRegexp = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // ErrAccountNotFound is returned when Argo CD does not know the requested account.
 var ErrAccountNotFound = errors.New("argocd-connector: account not found")
@@ -116,7 +121,7 @@ func validateAccountName(username string) error {
 	if !accountNameRegexp.MatchString(username) {
 		return fmt.Errorf(
 			"argocd-connector: invalid account name %q: Argo CD local account names may only contain "+
-				"alphanumerics, '-', '_' and '.'",
+				"alphanumerics, '-' and '_'",
 			username,
 		)
 	}

@@ -74,6 +74,7 @@ rules:
     verbs: ["get", "list", "patch", "update"]
   - apiGroups: [""]
     resources: ["secrets"]
+    resourceNames: ["argocd-secret"]
     verbs: ["get", "patch"]
 ```
 
@@ -83,7 +84,13 @@ rules:
 - `list`: List ConfigMaps in the namespace (required to discover and access the ConfigMaps)
 - `patch`: Partially update ConfigMaps (used to modify RBAC policies and user accounts)
 - `update`: Fully update ConfigMaps (used as an alternative to patch for modifying ConfigMaps)
-- `get`/`patch` on `secrets`: Read and purge a deprovisioned account's stored credentials in `argocd-secret`. Only needed for account deprovisioning; omit both if you do not use it.
+- `get`/`patch` on `secrets`: Read and purge a deprovisioned account's stored credentials in `argocd-secret`. Restricted to that one Secret by name, so the connector cannot read the repository and cluster credentials that also live in the `argocd` namespace. Only needed for account deprovisioning; omit the rule entirely if you do not use it.
+
+<Warning>
+  The `argocd-secret` permissions are new. Existing deployments must re-apply this role before
+  account deprovisioning is used. Without them the credential-purge step fails with a `403`
+  after the account has already been disabled or deleted, leaving its stored credentials in place.
+</Warning>
 
 Apply with:
 

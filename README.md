@@ -85,7 +85,13 @@ Notes and limitations:
 ### Kubernetes permissions
 
 Deprovisioning needs `get` and `patch` on the `argocd-secret` Secret in addition to the ConfigMap
-permissions used by sync and provisioning:
+permissions used by sync and provisioning. The Secret rule is restricted to `argocd-secret` by
+name so the connector cannot read the repository and cluster credentials that also live in the
+`argocd` namespace.
+
+**Upgrading an existing deployment:** these Secret permissions are new. Re-apply the role before
+deprovisioning is used — without them the credential-purge step fails with a `403` after the
+account has already been disabled or deleted, leaving its stored credentials in place.
 
 ```yaml
 rules:
@@ -94,6 +100,7 @@ rules:
     verbs: ["get", "list", "patch", "update"]
   - apiGroups: [""]
     resources: ["secrets"]
+    resourceNames: ["argocd-secret"]
     verbs: ["get", "patch"]
 ```
 

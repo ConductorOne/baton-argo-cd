@@ -59,6 +59,14 @@ var (
 		field.WithRequired(false),
 		field.WithDisplayName("Account deprovisioning mode"),
 		field.WithPlaceholder(string(client.DeprovisionModeDisable)),
+		// Constrain the value at config validation so a typo is rejected by name instead of
+		// failing connector construction, and so the allowed values are discoverable.
+		field.WithString(func(r *field.StringRuler) {
+			r.In([]string{
+				string(client.DeprovisionModeDisable),
+				string(client.DeprovisionModeDelete),
+			})
+		}),
 	)
 	ConfigurationFields = []field.SchemaField{
 		UsernameField, PasswordField, ApiUrlField, KubeconfigPathField, InsecureSkipVerifyField, CACertPathField,

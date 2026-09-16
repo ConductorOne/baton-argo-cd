@@ -66,6 +66,16 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "invalid config - unknown deprovision mode",
+			config: &ArgoCd{
+				Username:        "admin",
+				Password:        "test-password",
+				ApiUrl:          "https://test.com",
+				DeprovisionMode: "purge",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
