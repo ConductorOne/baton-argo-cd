@@ -535,52 +535,26 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 	}
 
 	accountKey := accountKeyPrefix + username
-	enabledKey := accountKey + accountEnabledSuffix
 
-	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s': %w",
-			argoCDConfigMapName, argocdNamespace, err,
-		)
-	}
-
-	var ops []jsonPatchOperation
-
-	// JSON Patch `add` needs its parent container to exist, and Argo CD's upstream install
-	// manifests ship argocd-cm with no `data` map at all - the state of any cluster that has
-	// no local accounts yet. Create the container first in that case.
-	if cm.Data == nil {
-		ops = append(ops, jsonPatchOperation{
-			Op:    jsonPatchOpAdd,
-			Path:  "/data",
-			Value: map[string]string{},
-		})
-	}
-
-	ops = append(ops, jsonPatchOperation{
-		Op:    jsonPatchOpAdd,
-		Path:  dataKeyPath(accountKey),
-		Value: defaultAccountCapabilities,
-	})
-
-	// A re-provisioned account may still carry `accounts.<name>.enabled: "false"` from a
-	// previous `disable` deprovision. Argo CD treats the account as enabled only when the key
-	// is absent, so leaving it behind yields an account that cannot authenticate even though
+	// A JSON merge patch does all three things this needs in one non-destructive request, with
+	// no read-modify-write to race against: it creates the `data` container when argocd-cm has
+	// none (the state of Argo CD's upstream install manifests, and so of any cluster with no
+	// local accounts yet), adds the account, and clears any `accounts.<name>.enabled` flag left
+	// by a previous `disable` deprovision -- a null member removes the key, and is a no-op when
+	// it is already absent. Argo CD treats an account as enabled only when that key is missing,
+	// so a stale flag would otherwise yield an account that cannot authenticate even though
 	// provisioning reported success.
-	if _, hasEnabled := cm.Data[enabledKey]; hasEnabled {
-		ops = append(ops, jsonPatchOperation{
-			Op:   jsonPatchOpRemove,
-			Path: dataKeyPath(enabledKey),
-		})
-	}
-
-	cmPatch, err := marshalJSONPatch(ops)
+	cmPatch, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			accountKey:                        defaultAccountCapabilities,
+			accountKey + accountEnabledSuffix: nil,
+		},
+	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("argocd-connector: failed to marshal ConfigMap patch: %w", err)
 	}
 
-	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.JSONPatchType, cmPatch, metav1.PatchOptions{}); err != nil {
+	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.MergePatchType, cmPatch, metav1.PatchOptions{}); err != nil {
 		return nil, nil, fmt.Errorf("argocd-connector: failed to update ConfigMap: %w", err)
 	}
 	l.Debug("ConfigMap updated successfully")
