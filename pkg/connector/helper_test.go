@@ -5,6 +5,7 @@ import (
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,8 +49,8 @@ func TestParseAccountResource_Status(t *testing.T) {
 			// The deprecated trait status must agree with the resource status: the SDK
 			// defaults an unset trait status to enabled independently of the resource
 			// attribute, so a disabled account would otherwise contradict itself.
-			var trait v2.UserTrait
-			require.NoError(t, res.GetAnnotations()[0].UnmarshalTo(&trait))
+			trait, err := resource.GetUserTrait(res)
+			require.NoError(t, err)
 			//nolint:staticcheck // asserting the deprecated trait status is the point of this test
 			assert.Equal(t, tt.wantTrait, trait.GetStatus().GetStatus())
 

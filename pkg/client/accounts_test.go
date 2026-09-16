@@ -620,3 +620,38 @@ func TestCreateAccount_NilConfigMapData(t *testing.T) {
 
 	assert.Equal(t, "apiKey, login", getConfigMapData(t, k8sClient)["accounts.first-account"])
 }
+
+// TestCreateAccount_PreservesUnrelatedConfigMapKeys verifies creating an account never clobbers
+// the rest of argocd-cm. A JSON Patch that created the `data` container unconditionally would
+// replace the whole map; the merge patch used here adds one key and leaves everything else in
+// place, including other local accounts and Argo CD's own settings.
+func TestCreateAccount_PreservesUnrelatedConfigMapKeys(t *testing.T) {
+	ctx := context.Background()
+	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
+		"url":                  "https://argocd.example.com",
+		"oidc.config":          "name: Okta",
+		"policy.default":       "role:readonly",
+		"accounts.bob":         "login",
+		"accounts.bob.enabled": "false",
+	}))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":"t"}`))
+	}))
+	defer srv.Close()
+
+	cli := newTestClient(k8sClient, srv.URL, srv.Client())
+	_, _, err := cli.CreateAccount(ctx, "alice", "pw")
+	require.NoError(t, err)
+
+	data := getConfigMapData(t, k8sClient)
+	assert.Equal(t, "apiKey, login", data["accounts.alice"])
+	// Argo CD's own settings survive.
+	assert.Equal(t, "https://argocd.example.com", data["url"])
+	assert.Equal(t, "name: Okta", data["oidc.config"])
+	assert.Equal(t, "role:readonly", data["policy.default"])
+	// Another account, including its disabled flag, is untouched.
+	assert.Equal(t, "login", data["accounts.bob"])
+	assert.Equal(t, "false", data["accounts.bob.enabled"])
+}

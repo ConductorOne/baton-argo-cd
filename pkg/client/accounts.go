@@ -93,11 +93,9 @@ func ParseDeprovisionMode(value string) (DeprovisionMode, error) {
 // jsonPatchOperation is a single RFC 6902 operation. Building patches through this type (rather
 // than string formatting) keeps account names from breaking out of the JSON document.
 type jsonPatchOperation struct {
-	Op   string `json:"op"`
-	Path string `json:"path"`
-	// Value is omitted for `remove`, which the Kubernetes API rejects when it is present.
-	// It is `any` rather than `string` so a patch can create a missing `data` container.
-	Value any `json:"value,omitempty"`
+	Op    string  `json:"op"`
+	Path  string  `json:"path"`
+	Value *string `json:"value,omitempty"`
 }
 
 // marshalJSONPatch serializes operations into a JSON Patch document.
@@ -327,10 +325,11 @@ func (c *Client) DisableAccount(ctx context.Context, username string) error {
 		op = jsonPatchOpReplace
 	}
 
+	disabled := accountDisabledValue
 	patch, err := marshalJSONPatch([]jsonPatchOperation{{
 		Op:    op,
 		Path:  dataKeyPath(enabledKey),
-		Value: accountDisabledValue,
+		Value: &disabled,
 	}})
 	if err != nil {
 		return err
