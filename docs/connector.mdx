@@ -8,16 +8,50 @@ sidebarTitle: "ArgoCD"
 
 ## Capabilities
 
-| Resource | Sync | Provision |
-| :--- | :--- | :--- |
-| Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Resource | Sync | Provision | Deprovision |
+| :--- | :--- | :--- | :--- |
+| Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | — |
 
 The ArgoCD connector supports [automatic account provisioning](/product/admin/account-provisioning).
 
 When a new account is created by C1, the account's password will be sent to a [vault](/product/admin/vaults).
 
-This connector does not support account deprovisioning. You must deprovision accounts directly in ArgoCD.
+### Account deprovisioning
+
+The connector deprovisions ArgoCD **local accounts** (the `accounts.*` entries in the `argocd-cm`
+ConfigMap). ArgoCD's Account API exposes no delete or disable endpoint, so the account entry is
+changed through the Kubernetes API.
+
+Deprovisioning an account performs three steps:
+
+1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
+2. Disables or deletes the account entry in `argocd-cm`, depending on the **Account deprovisioning
+   mode** setting.
+3. Purges the account's stored credentials - its password hash, password mtime marker, and token
+   records - from the `argocd-secret` Secret, so no residual access path survives the account.
+
+The **Account deprovisioning mode** setting (`--deprovision-mode`) controls step 2:
+
+| Mode | Behavior |
+| :--- | :--- |
+| `disable` (default) | Sets `accounts.<name>.enabled: "false"` in `argocd-cm`. Reversible, and preserves the account's audit identity. Re-enabling the account requires setting a new password, because credentials are purged. |
+| `delete` | Removes the `accounts.<name>` entry from `argocd-cm` entirely. |
+
+Notes and limitations:
+
+- The built-in `admin` account cannot be deprovisioned. It is controlled by the top-level
+  `admin.enabled` key in `argocd-cm`, not by `accounts.*`.
+- SSO/Dex-managed identities are not local accounts, so there is nothing for the connector to
+  deprovision in ArgoCD itself.
+- Deprovisioning is idempotent: an account that is already disabled, already deleted, or has no
+  stored credentials is reported as successfully deprovisioned.
+- Account names may contain only alphanumerics, `-` and `_`. ArgoCD splits `accounts.*` keys in
+  `argocd-cm` on `.`, so a dotted name is not addressable as an account — `accounts.john.smith`
+  is parsed as a `smith` property of an account named `john`. Provisioning and deprovisioning
+  both reject such names rather than writing a key ArgoCD would silently ignore.
+- Deprovisioning requires the `secrets` Kubernetes permissions described below, in addition to the
+  `configmaps` permissions used for sync and provisioning.
 
 ## Gather ArgoCD credentials
 
@@ -25,10 +59,12 @@ Configuring the connector requires you to pass in credentials generated in ArgoC
 
 ### Create a Role with required permissions
 
-The connector needs permissions to read and modify ArgoCD ConfigMaps. Create a Role that grants access to the following ConfigMaps:
+The connector needs permissions to read and modify ArgoCD ConfigMaps, and to read and patch the
+ArgoCD Secret. Create a Role that grants access to the following objects:
 
-- `argocd-rbac-cm`: Contains RBAC policies and role grants (needs read and write access)
-- `argocd-cm`: Contains ArgoCD configuration including user accounts (needs write access for provisioning)
+- `argocd-rbac-cm` ConfigMap: Contains RBAC policies and role grants (needs read and write access)
+- `argocd-cm` ConfigMap: Contains ArgoCD configuration including user accounts (needs write access for provisioning and deprovisioning)
+- `argocd-secret` Secret: Contains local accounts' password hashes and API token records (needs read and write access for deprovisioning)
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -40,6 +76,10 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["argocd-secret"]
+    verbs: ["get", "patch"]
 ```
 
 **Required Permissions Explained:**
@@ -48,6 +88,13 @@ rules:
 - `list`: List ConfigMaps in the namespace (required to discover and access the ConfigMaps)
 - `patch`: Partially update ConfigMaps (used to modify RBAC policies and user accounts)
 - `update`: Fully update ConfigMaps (used as an alternative to patch for modifying ConfigMaps)
+- `get`/`patch` on `secrets`: Read and purge a deprovisioned account's stored credentials in `argocd-secret`. Restricted to that one Secret by name, so the connector cannot read the repository and cluster credentials that also live in the `argocd` namespace. Only needed for account deprovisioning; omit the rule entirely if you do not use it.
+
+<Warning>
+  The `argocd-secret` permissions are new. Existing deployments must re-apply this role before
+  account deprovisioning is used. Without them the credential-purge step fails with a `403`
+  after the account has already been disabled or deleted, leaving its stored credentials in place.
+</Warning>
 
 Apply with:
 

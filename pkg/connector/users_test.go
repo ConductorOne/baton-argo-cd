@@ -28,7 +28,7 @@ func TestUserBuilder_List(t *testing.T) {
 			},
 		}
 
-		builder := newUserBuilder(mockCli)
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
 		resources, nextPage, annos, err := builder.List(context.Background(), nil, &pagination.Token{})
 		require.NoError(t, err)
 		assert.Empty(t, nextPage)
@@ -44,7 +44,7 @@ func TestUserBuilder_List(t *testing.T) {
 			},
 		}
 
-		builder := newUserBuilder(mockCli)
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
 		_, _, _, err := builder.List(context.Background(), nil, &pagination.Token{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to fetch user data")
@@ -53,7 +53,7 @@ func TestUserBuilder_List(t *testing.T) {
 
 // TestUserBuilder_Entitlements tests the Entitlements method.
 func TestUserBuilder_Entitlements(t *testing.T) {
-	builder := newUserBuilder(nil)
+	builder := newUserBuilder(nil, client.DeprovisionModeDisable)
 	resource := &v2.Resource{
 		Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "test-user"},
 	}
@@ -67,7 +67,7 @@ func TestUserBuilder_Entitlements(t *testing.T) {
 
 // TestUserBuilder_Grants tests the Grants method.
 func TestUserBuilder_Grants(t *testing.T) {
-	builder := newUserBuilder(nil)
+	builder := newUserBuilder(nil, client.DeprovisionModeDisable)
 	resource := &v2.Resource{
 		Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "test-user"},
 	}
@@ -81,7 +81,7 @@ func TestUserBuilder_Grants(t *testing.T) {
 
 // TestUserBuilder_CreateAccountCapabilityDetails tests capability details.
 func TestUserBuilder_CreateAccountCapabilityDetails(t *testing.T) {
-	builder := newUserBuilder(nil)
+	builder := newUserBuilder(nil, client.DeprovisionModeDisable)
 
 	details, annos, err := builder.CreateAccountCapabilityDetails(context.Background())
 	require.NoError(t, err)
@@ -107,7 +107,7 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 			},
 		}
 
-		builder := newUserBuilder(mockCli)
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
 		accountInfo := &v2.AccountInfo{
 			Login: "test-user",
 		}
@@ -125,7 +125,7 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 	})
 
 	t.Run("error missing username", func(t *testing.T) {
-		builder := newUserBuilder(nil)
+		builder := newUserBuilder(nil, client.DeprovisionModeDisable)
 		accountInfo := &v2.AccountInfo{
 			Profile: createProfile(map[string]interface{}{
 				"email": "test@example.com",
@@ -148,7 +148,7 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 			},
 		}
 
-		builder := newUserBuilder(mockCli)
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
 		accountInfo := &v2.AccountInfo{
 			Login: "test-user",
 		}
@@ -203,4 +203,227 @@ func TestUserBuilder_ExtractUsername(t *testing.T) {
 func createProfile(data map[string]interface{}) *structpb.Struct {
 	profile, _ := structpb.NewStruct(data)
 	return profile
+}
+
+// TestUserBuilder_Delete_DisableMode verifies the disable-mode deprovision sequence: tokens are
+// revoked through the API, the account entry is disabled (not deleted), and stored credentials
+// are purged.
+func TestUserBuilder_Delete_DisableMode(t *testing.T) {
+	var calls []string
+	mockCli := &test.MockClient{
+		RevokeAccountTokensFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "revoke-tokens")
+			return nil
+		},
+		DisableAccountFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "disable")
+			return nil
+		},
+		DeleteAccountFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "delete")
+			return nil
+		},
+		PurgeAccountCredentialsFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "purge-credentials")
+			return nil
+		},
+	}
+
+	builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
+	annos, err := builder.Delete(context.Background(), &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     "alice",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, annos)
+
+	// Tokens must be revoked while the account is still resolvable through the Argo CD API, and
+	// credentials purged only after the account entry is gone.
+	assert.Equal(t, []string{"revoke-tokens", "disable", "purge-credentials"}, calls)
+}
+
+// TestUserBuilder_Delete_DeleteMode verifies delete mode removes the account entry instead of
+// disabling it.
+func TestUserBuilder_Delete_DeleteMode(t *testing.T) {
+	var calls []string
+	mockCli := &test.MockClient{
+		RevokeAccountTokensFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "revoke-tokens")
+			return nil
+		},
+		DisableAccountFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "disable")
+			return nil
+		},
+		DeleteAccountFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "delete")
+			return nil
+		},
+		PurgeAccountCredentialsFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "purge-credentials")
+			return nil
+		},
+	}
+
+	builder := newUserBuilder(mockCli, client.DeprovisionModeDelete)
+	_, err := builder.Delete(context.Background(), &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"revoke-tokens", "delete", "purge-credentials"}, calls)
+}
+
+// TestUserBuilder_Delete_DefaultsToDisable verifies an unset mode falls back to the reversible
+// disable behaviour.
+func TestUserBuilder_Delete_DefaultsToDisable(t *testing.T) {
+	var disabled bool
+	mockCli := &test.MockClient{
+		DisableAccountFunc: func(ctx context.Context, username string) error {
+			disabled = true
+			return nil
+		},
+		DeleteAccountFunc: func(ctx context.Context, username string) error {
+			t.Fatal("delete must not be used when no deprovision mode is configured")
+			return nil
+		},
+	}
+
+	builder := newUserBuilder(mockCli, "")
+	_, err := builder.Delete(context.Background(), &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     "alice",
+	})
+	require.NoError(t, err)
+	assert.True(t, disabled)
+	assert.Equal(t, client.DeprovisionModeDisable, builder.deprovisionMode)
+}
+
+// TestUserBuilder_Delete_TrimsResourceID verifies surrounding whitespace in the resource id does
+// not leak into the account name used for API and ConfigMap operations.
+func TestUserBuilder_Delete_TrimsResourceID(t *testing.T) {
+	mockCli := &test.MockClient{
+		DisableAccountFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			return nil
+		},
+	}
+
+	builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
+	_, err := builder.Delete(context.Background(), &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     "  alice  ",
+	})
+	require.NoError(t, err)
+}
+
+// TestUserBuilder_Delete_Validation covers rejected delete requests.
+func TestUserBuilder_Delete_Validation(t *testing.T) {
+	t.Run("wrong resource type", func(t *testing.T) {
+		builder := newUserBuilder(&test.MockClient{}, client.DeprovisionModeDisable)
+		_, err := builder.Delete(context.Background(), &v2.ResourceId{
+			ResourceType: roleResourceType.Id,
+			Resource:     "developers",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot deprovision resource type")
+	})
+
+	t.Run("empty resource id", func(t *testing.T) {
+		builder := newUserBuilder(&test.MockClient{}, client.DeprovisionModeDisable)
+		_, err := builder.Delete(context.Background(), &v2.ResourceId{
+			ResourceType: userResourceType.Id,
+			Resource:     "   ",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resource id is empty")
+	})
+
+	t.Run("unsupported mode", func(t *testing.T) {
+		builder := &userBuilder{
+			resourceType:    userResourceType,
+			client:          &test.MockClient{},
+			deprovisionMode: client.DeprovisionMode("purge"),
+		}
+		_, err := builder.Delete(context.Background(), &v2.ResourceId{
+			ResourceType: userResourceType.Id,
+			Resource:     "alice",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported deprovision mode")
+	})
+}
+
+// TestUserBuilder_Delete_PropagatesErrors verifies a failure in any step aborts the deprovision
+// with a wrapped error instead of silently continuing.
+func TestUserBuilder_Delete_PropagatesErrors(t *testing.T) {
+	resourceID := &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "alice"}
+
+	t.Run("token revocation fails", func(t *testing.T) {
+		var disableCalled bool
+		mockCli := &test.MockClient{
+			RevokeAccountTokensFunc: func(ctx context.Context, username string) error {
+				return errors.New("permission denied")
+			},
+			DisableAccountFunc: func(ctx context.Context, username string) error {
+				disableCalled = true
+				return nil
+			},
+		}
+
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
+		_, err := builder.Delete(context.Background(), resourceID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to revoke API tokens")
+		assert.False(t, disableCalled, "the account must not be disabled when token revocation failed")
+	})
+
+	t.Run("disable fails", func(t *testing.T) {
+		var purgeCalled bool
+		mockCli := &test.MockClient{
+			DisableAccountFunc: func(ctx context.Context, username string) error {
+				return errors.New("configmap patch rejected")
+			},
+			PurgeAccountCredentialsFunc: func(ctx context.Context, username string) error {
+				purgeCalled = true
+				return nil
+			},
+		}
+
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
+		_, err := builder.Delete(context.Background(), resourceID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to disable account")
+		assert.False(t, purgeCalled)
+	})
+
+	t.Run("delete fails", func(t *testing.T) {
+		mockCli := &test.MockClient{
+			DeleteAccountFunc: func(ctx context.Context, username string) error {
+				return errors.New("configmap patch rejected")
+			},
+		}
+
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDelete)
+		_, err := builder.Delete(context.Background(), resourceID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to delete account")
+	})
+
+	t.Run("credential purge fails", func(t *testing.T) {
+		mockCli := &test.MockClient{
+			PurgeAccountCredentialsFunc: func(ctx context.Context, username string) error {
+				return errors.New("secret patch rejected")
+			},
+		}
+
+		builder := newUserBuilder(mockCli, client.DeprovisionModeDisable)
+		_, err := builder.Delete(context.Background(), resourceID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to purge stored credentials")
+	})
 }

@@ -28,6 +28,44 @@ type MockClient struct {
 	GetRoleSubjectsFunc        func(ctx context.Context, roleID string) ([]string, error)
 	GetRoleUsersFunc           func(ctx context.Context, roleID string) ([]*client.Account, error)
 	GetRBACConfigMapFunc       func(ctx context.Context) (*corev1.ConfigMap, error)
+
+	// Account deprovisioning.
+	RevokeAccountTokensFunc     func(ctx context.Context, username string) error
+	DisableAccountFunc          func(ctx context.Context, username string) error
+	DeleteAccountFunc           func(ctx context.Context, username string) error
+	PurgeAccountCredentialsFunc func(ctx context.Context, username string) error
+}
+
+// RevokeAccountTokens calls the mock method if it is defined.
+func (m *MockClient) RevokeAccountTokens(ctx context.Context, username string) error {
+	if m.RevokeAccountTokensFunc != nil {
+		return m.RevokeAccountTokensFunc(ctx, username)
+	}
+	return nil
+}
+
+// DisableAccount calls the mock method if it is defined.
+func (m *MockClient) DisableAccount(ctx context.Context, username string) error {
+	if m.DisableAccountFunc != nil {
+		return m.DisableAccountFunc(ctx, username)
+	}
+	return nil
+}
+
+// DeleteAccount calls the mock method if it is defined.
+func (m *MockClient) DeleteAccount(ctx context.Context, username string) error {
+	if m.DeleteAccountFunc != nil {
+		return m.DeleteAccountFunc(ctx, username)
+	}
+	return nil
+}
+
+// PurgeAccountCredentials calls the mock method if it is defined.
+func (m *MockClient) PurgeAccountCredentials(ctx context.Context, username string) error {
+	if m.PurgeAccountCredentialsFunc != nil {
+		return m.PurgeAccountCredentialsFunc(ctx, username)
+	}
+	return nil
 }
 
 // GetAccounts calls the mock method if it is defined.
