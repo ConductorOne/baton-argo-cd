@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -56,13 +55,6 @@ const (
 // unescaped.
 var accountNameRegexp = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// ErrAccountNotFound is returned when Argo CD does not know the requested account.
-var ErrAccountNotFound = errors.New("argocd-connector: account not found")
-
-// ErrInvalidAccountTarget is returned when an account name is malformed or names an account the
-// connector refuses to change.
-var ErrInvalidAccountTarget = errors.New("argocd-connector: invalid account target")
-
 // jsonPatchOperation is a single RFC 6902 operation. Building patches through this type (rather
 // than string formatting) keeps account names from breaking out of the JSON document.
 type jsonPatchOperation struct {
@@ -93,46 +85,41 @@ func dataKeyPath(key string) string {
 // validateAccountName rejects names that cannot be a valid Argo CD local account.
 func validateAccountName(username string) error {
 	if username == "" {
-		return fmt.Errorf("%w: account name is required", ErrInvalidAccountTarget)
+		return invalidAccountTargetError("account name is required")
 	}
 	if !accountNameRegexp.MatchString(username) {
-		return fmt.Errorf(
-			"%w: invalid account name %q: Argo CD local account names may only contain "+
-				"alphanumerics, '-' and '_'",
-			ErrInvalidAccountTarget, username,
+		return invalidAccountTargetError(
+			"invalid account name %q: Argo CD local account names may only contain alphanumerics, '-' and '_'",
+			username,
 		)
 	}
 	return nil
 }
 
-// guardManagedAccount validates an account name and refuses to change protected accounts.
-// operation names the change ("delete", "disable", ...) for the error message.
-func guardManagedAccount(username string, operation string) error {
+// guardManagedAccount validates an account name and refuses to change protected accounts: the
+// built-in admin account always, and, for a change that revokes access, the account the connector
+// itself authenticates as, since the connector would lock itself out of Argo CD. operation names
+// the change ("delete", "disable", ...) for the error message.
+func (c *Client) guardManagedAccount(username string, operation string, revokesAccess bool) error {
 	if err := validateAccountName(username); err != nil {
 		return err
 	}
 
 	if strings.EqualFold(username, adminAccountName) {
-		return fmt.Errorf(
-			"%w: refusing to %s the built-in %q account: it is controlled by the "+
-				"top-level 'admin.enabled' key in argocd-cm, not by 'accounts.*'",
-			ErrInvalidAccountTarget, operation, adminAccountName,
+		return invalidAccountTargetError(
+			"refusing to %s the built-in %q account: it is controlled by the top-level 'admin.*' keys, not by 'accounts.*'",
+			operation, adminAccountName,
+		)
+	}
+
+	if revokesAccess && c.username != "" && strings.EqualFold(username, c.username) {
+		return invalidAccountTargetError(
+			"refusing to %s %q: the connector authenticates as this account and would lose access to Argo CD",
+			operation, username,
 		)
 	}
 
 	return nil
-}
-
-// warnOnSelfLockout logs a warning when a change that revokes access targets the account the
-// connector itself authenticates as.
-func (c *Client) warnOnSelfLockout(ctx context.Context, username string, operation string) {
-	if c.username != "" && strings.EqualFold(username, c.username) {
-		ctxzap.Extract(ctx).Warn(
-			"changing the Argo CD account the connector authenticates as; the connector will lose access",
-			zap.String("account", username),
-			zap.String("operation", operation),
-		)
-	}
 }
 
 // GetAccount fetches a single account from Argo CD. It returns an error wrapping
@@ -164,15 +151,11 @@ func (c *Client) GetAccount(ctx context.Context, username string) (*Account, err
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, username)
+		return nil, accountNotFoundError("%s", username)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf(
-			"argocd-connector: failed to fetch account %q with status %d: %s",
-			username, resp.StatusCode, string(bodyBytes),
-		)
+		return nil, httpStatusError(resp, fmt.Sprintf("argocd-connector: failed to fetch account %q", username))
 	}
 
 	var account Account
@@ -192,10 +175,9 @@ func (c *Client) GetAccount(ctx context.Context, username string) (*Account, err
 func (c *Client) RevokeAccountTokens(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := guardManagedAccount(username, "revoke API tokens of"); err != nil {
+	if err := c.guardManagedAccount(username, "revoke API tokens of", true); err != nil {
 		return err
 	}
-	c.warnOnSelfLockout(ctx, username, "revoke API tokens")
 
 	account, err := c.GetAccount(ctx, username)
 	if err != nil {
@@ -230,14 +212,8 @@ func (c *Client) RevokeAccountTokens(ctx context.Context, username string) error
 // a stale password.
 // Endpoint: PUT /api/v1/account/password.
 func (c *Client) RotateAccountPassword(ctx context.Context, username string, password string) error {
-	if err := guardManagedAccount(username, "rotate the password of"); err != nil {
+	if err := c.guardManagedAccount(username, "rotate the password of", true); err != nil {
 		return err
-	}
-	if c.username != "" && strings.EqualFold(username, c.username) {
-		return fmt.Errorf(
-			"%w: refusing to rotate the password of %q: the connector authenticates as this account",
-			ErrInvalidAccountTarget, username,
-		)
 	}
 
 	if _, err := c.GetAccount(ctx, username); err != nil {
@@ -276,11 +252,7 @@ func (c *Client) revokeAccountToken(ctx context.Context, username string, tokenI
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf(
-			"argocd-connector: failed to revoke token %q for account %q with status %d: %s",
-			tokenID, username, resp.StatusCode, string(bodyBytes),
-		)
+		return httpStatusError(resp, fmt.Sprintf("argocd-connector: failed to revoke token %q for account %q", tokenID, username))
 	}
 
 	return nil
@@ -304,26 +276,23 @@ func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled
 		operation = "enable"
 	}
 
-	if err := guardManagedAccount(username, operation); err != nil {
+	if err := c.guardManagedAccount(username, operation, !enabled); err != nil {
 		return err
-	}
-	if !enabled {
-		c.warnOnSelfLockout(ctx, username, operation)
 	}
 
 	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf(
-			"argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s': %w",
-			argoCDConfigMapName, argocdNamespace, err,
-		)
+		return kubernetesError(err, fmt.Sprintf(
+			"argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s'",
+			argoCDConfigMapName, argocdNamespace,
+		))
 	}
 
 	accountKey := accountKeyPrefix + username
 	enabledKey := accountKey + accountEnabledSuffix
 
 	if _, ok := cm.Data[accountKey]; !ok {
-		return fmt.Errorf("%w: %s is not defined in ConfigMap '%s'", ErrAccountNotFound, username, argoCDConfigMapName)
+		return accountNotFoundError("%s is not defined in ConfigMap '%s'", username, argoCDConfigMapName)
 	}
 
 	currentValue, hasEnabled := cm.Data[enabledKey]
@@ -358,15 +327,68 @@ func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled
 	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(
 		ctx, argoCDConfigMapName, types.JSONPatchType, patch, metav1.PatchOptions{},
 	); err != nil {
-		return fmt.Errorf(
-			"argocd-connector: failed to %s account %q in ConfigMap '%s': %w",
-			operation, username, argoCDConfigMapName, err,
-		)
+		return kubernetesError(err, fmt.Sprintf(
+			"argocd-connector: failed to %s account %q in ConfigMap '%s'",
+			operation, username, argoCDConfigMapName,
+		))
 	}
 
 	l.Debug("Updated Argo CD local account state",
 		zap.String("account", username),
 		zap.Bool("enabled", enabled),
+	)
+	return nil
+}
+
+// RemoveAccountRoleGrants removes every role grant (`g, <name>, <role>` line) for an account from
+// `policy.csv` in `argocd-rbac-cm`. Without this the grants outlive a deleted account and are
+// inherited by any account later created with the same name. Policy (`p`) lines are left
+// untouched. An account with no grants is left as is.
+func (c *Client) RemoveAccountRoleGrants(ctx context.Context, username string) error {
+	l := ctxzap.Extract(ctx)
+
+	if err := c.guardManagedAccount(username, "remove the role grants of", true); err != nil {
+		return err
+	}
+
+	cm, err := c.GetRBACConfigMap(ctx)
+	if err != nil {
+		return kubernetesError(err, "argocd-connector: failed to get rbac configmap")
+	}
+
+	policyCsv, ok := cm.Data[policyCSVKey]
+	if !ok {
+		l.Debug("RBAC ConfigMap has no policy, no role grants to remove", zap.String("account", username))
+		return nil
+	}
+
+	records, err := parsePolicyCSV(policyCsv)
+	if err != nil {
+		return err
+	}
+
+	kept := make([][]string, 0, len(records))
+	var removed int
+	for _, record := range records {
+		if len(record) > 2 && record[0] == policyTypeGrant && record[1] == username {
+			removed++
+			continue
+		}
+		kept = append(kept, record)
+	}
+
+	if removed == 0 {
+		l.Debug("Argo CD local account has no role grants to remove", zap.String("account", username))
+		return nil
+	}
+
+	if err := c.updateRBACPolicy(ctx, kept, true); err != nil {
+		return kubernetesError(err, fmt.Sprintf("argocd-connector: failed to remove role grants of account %q", username))
+	}
+
+	l.Debug("Removed Argo CD local account role grants",
+		zap.String("account", username),
+		zap.Int("removed_grants", removed),
 	)
 	return nil
 }
@@ -377,17 +399,16 @@ func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled
 func (c *Client) DeleteAccount(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := guardManagedAccount(username, "delete"); err != nil {
+	if err := c.guardManagedAccount(username, "delete", true); err != nil {
 		return err
 	}
-	c.warnOnSelfLockout(ctx, username, "delete")
 
 	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf(
-			"argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s': %w",
-			argoCDConfigMapName, argocdNamespace, err,
-		)
+		return kubernetesError(err, fmt.Sprintf(
+			"argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s'",
+			argoCDConfigMapName, argocdNamespace,
+		))
 	}
 
 	accountKey := accountKeyPrefix + username
@@ -415,10 +436,10 @@ func (c *Client) DeleteAccount(ctx context.Context, username string) error {
 	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(
 		ctx, argoCDConfigMapName, types.JSONPatchType, patch, metav1.PatchOptions{},
 	); err != nil {
-		return fmt.Errorf(
-			"argocd-connector: failed to delete account %q from ConfigMap '%s': %w",
-			username, argoCDConfigMapName, err,
-		)
+		return kubernetesError(err, fmt.Sprintf(
+			"argocd-connector: failed to delete account %q from ConfigMap '%s'",
+			username, argoCDConfigMapName,
+		))
 	}
 
 	l.Debug("Deleted Argo CD local account", zap.String("account", username))
@@ -432,16 +453,16 @@ func (c *Client) DeleteAccount(ctx context.Context, username string) error {
 func (c *Client) PurgeAccountCredentials(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := guardManagedAccount(username, "purge stored credentials of"); err != nil {
+	if err := c.guardManagedAccount(username, "purge stored credentials of", true); err != nil {
 		return err
 	}
 
 	secret, err := c.k8sClient.CoreV1().Secrets(argocdNamespace).Get(ctx, argoCDSecretName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf(
-			"argocd-connector: failed to fetch Secret '%s' in namespace '%s': %w",
-			argoCDSecretName, argocdNamespace, err,
-		)
+		return kubernetesError(err, fmt.Sprintf(
+			"argocd-connector: failed to fetch Secret '%s' in namespace '%s'",
+			argoCDSecretName, argocdNamespace,
+		))
 	}
 
 	accountKey := accountKeyPrefix + username
@@ -470,10 +491,10 @@ func (c *Client) PurgeAccountCredentials(ctx context.Context, username string) e
 	if _, err := c.k8sClient.CoreV1().Secrets(argocdNamespace).Patch(
 		ctx, argoCDSecretName, types.JSONPatchType, patch, metav1.PatchOptions{},
 	); err != nil {
-		return fmt.Errorf(
-			"argocd-connector: failed to purge stored credentials for account %q from Secret '%s': %w",
-			username, argoCDSecretName, err,
-		)
+		return kubernetesError(err, fmt.Sprintf(
+			"argocd-connector: failed to purge stored credentials for account %q from Secret '%s'",
+			username, argoCDSecretName,
+		))
 	}
 
 	l.Debug("Purged stored credentials for Argo CD local account",

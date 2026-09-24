@@ -729,12 +729,25 @@ func (c *Client) UpdateUserPassword(ctx context.Context, username string, passwo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("argocd-connector: failed to update user password with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return httpStatusError(resp, "argocd-connector: failed to update user password")
 	}
 
 	// Success response is empty body with 200 status
 	return nil
+}
+
+// parsePolicyCSV parses the `policy.csv` value of `argocd-rbac-cm` into its records.
+func parsePolicyCSV(policyCsv string) ([][]string, error) {
+	reader := csv.NewReader(strings.NewReader(policyCsv))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("argocd-connector: failed to parse policy csv: %w", err)
+	}
+	return records, nil
 }
 
 // RemoveUserRole removes a role grant from a user in the `argocd-rbac-cm` ConfigMap.
@@ -752,14 +765,9 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
 
-	reader := csv.NewReader(strings.NewReader(policyCsv))
-	reader.Comment = '#'
-	reader.TrimLeadingSpace = true
-	reader.FieldsPerRecord = -1
-
-	records, err := reader.ReadAll()
+	records, err := parsePolicyCSV(policyCsv)
 	if err != nil {
-		return nil, fmt.Errorf("argocd-connector: failed to parse policy csv: %w", err)
+		return nil, err
 	}
 
 	var newRecords [][]string

@@ -11,9 +11,9 @@ import (
 )
 
 // TestParseAccountResource_Status verifies a disabled Argo CD local account syncs into C1 as
-// disabled. The SDK defaults an unset status to enabled, so without an explicit status a
-// `disable`-mode deprovision -- which leaves the account in argocd-cm with enabled=false and
-// therefore still syncing -- would keep reporting the leaver as an active account.
+// disabled. The SDK defaults an unset status to enabled, so without an explicit status an
+// account disabled by the disable_user action -- which leaves it in argocd-cm with enabled=false
+// and therefore still syncing -- would keep reporting as an active account.
 func TestParseAccountResource_Status(t *testing.T) {
 	tests := []struct {
 		name      string

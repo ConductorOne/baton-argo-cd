@@ -2,11 +2,9 @@ package connector
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/conductorone/baton-argo-cd/pkg/client"
 	config "github.com/conductorone/baton-sdk/pb/c1/config/v1"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/actions"
@@ -162,14 +160,10 @@ func usernameFromArgs(args *structpb.Struct) (string, error) {
 	return username, nil
 }
 
-// accountActionError maps a client error to the gRPC code every account action reports for it.
+// accountActionError wraps a client error for an account action. Client errors carry the gRPC
+// code for their cause (NotFound for an unknown account, InvalidArgument for a protected or
+// malformed one, the mapped code for an API failure), and wrapping with %w preserves it.
 func accountActionError(err error, operation string, username string) error {
-	switch {
-	case errors.Is(err, client.ErrAccountNotFound):
-		return status.Errorf(codes.NotFound, "baton-argo-cd: %v", err)
-	case errors.Is(err, client.ErrInvalidAccountTarget):
-		return status.Errorf(codes.InvalidArgument, "baton-argo-cd: %v", err)
-	}
 	return fmt.Errorf("baton-argo-cd: failed to %s account %q: %w", operation, username, err)
 }
 

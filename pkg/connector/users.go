@@ -13,6 +13,8 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Compile-time assertions that userBuilder still satisfies the SDK interfaces it is registered
@@ -124,9 +126,12 @@ func (u *userBuilder) CreateAccount(
 //
 //  1. Revoke the account's issued API tokens through the Argo CD API. This is the only immediate
 //     revocation path, and it needs the account to still be resolvable through the API.
-//  2. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
-//  3. Purge the account's stored credentials (password hash and token records) from `argocd-secret`,
-//     so they are not silently reused if the account name is recreated.
+//  2. Remove the account's role grants from `policy.csv` in `argocd-rbac-cm`.
+//  3. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
+//  4. Purge the account's stored credentials (password hash and token records) from `argocd-secret`.
+//
+// Steps 2 and 4 keep a later account created with the same name from inheriting the old
+// account's roles and credentials.
 //
 // Each step treats an already-deleted state as success, so a retried delete converges instead of
 // failing.
@@ -134,7 +139,7 @@ func (u *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (an
 	l := ctxzap.Extract(ctx)
 
 	if rt := resourceId.GetResourceType(); rt != userResourceType.Id {
-		return nil, fmt.Errorf(
+		return nil, status.Errorf(codes.InvalidArgument,
 			"baton-argo-cd: cannot delete resource type %q: only %q resources can be deleted",
 			rt, userResourceType.Id,
 		)
@@ -142,12 +147,16 @@ func (u *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (an
 
 	username := strings.TrimSpace(resourceId.GetResource())
 	if username == "" {
-		return nil, fmt.Errorf("baton-argo-cd: cannot delete account: resource id is empty")
+		return nil, status.Error(codes.InvalidArgument, "baton-argo-cd: cannot delete account: resource id is empty")
 	}
 
 	// An account Argo CD no longer knows has no tokens left to revoke.
 	if err := u.client.RevokeAccountTokens(ctx, username); err != nil && !errors.Is(err, client.ErrAccountNotFound) {
 		return nil, fmt.Errorf("baton-argo-cd: failed to revoke API tokens for account %q: %w", username, err)
+	}
+
+	if err := u.client.RemoveAccountRoleGrants(ctx, username); err != nil {
+		return nil, fmt.Errorf("baton-argo-cd: failed to remove role grants for account %q: %w", username, err)
 	}
 
 	if err := u.client.DeleteAccount(ctx, username); err != nil {
@@ -182,7 +191,7 @@ func (u *userBuilder) Rotate(
 	credentialOptions *v2.LocalCredentialOptions,
 ) ([]*v2.PlaintextData, annotations.Annotations, error) {
 	if rt := resourceId.GetResourceType(); rt != userResourceType.Id {
-		return nil, nil, fmt.Errorf(
+		return nil, nil, status.Errorf(codes.InvalidArgument,
 			"baton-argo-cd: cannot rotate credentials of resource type %q: only %q resources are supported",
 			rt, userResourceType.Id,
 		)
@@ -190,12 +199,12 @@ func (u *userBuilder) Rotate(
 
 	username := strings.TrimSpace(resourceId.GetResource())
 	if username == "" {
-		return nil, nil, fmt.Errorf("baton-argo-cd: cannot rotate credentials: resource id is empty")
+		return nil, nil, status.Error(codes.InvalidArgument, "baton-argo-cd: cannot rotate credentials: resource id is empty")
 	}
 
 	password, err := generateCredentials(credentialOptions)
 	if err != nil {
-		return nil, nil, fmt.Errorf("baton-argo-cd: failed to generate password: %w", err)
+		return nil, nil, status.Errorf(codes.InvalidArgument, "baton-argo-cd: failed to generate password: %v", err)
 	}
 
 	if err := u.client.RotateAccountPassword(ctx, username, password); err != nil {

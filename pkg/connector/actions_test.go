@@ -10,6 +10,7 @@ import (
 	"github.com/conductorone/baton-argo-cd/test"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -110,6 +111,14 @@ func TestSetUserEnabled_InvalidArguments(t *testing.T) {
 }
 
 // TestSetUserEnabled_ErrorMapping verifies client errors surface with the matching gRPC code.
+// clientError builds an error shaped like the client's: a gRPC status joined with the typed
+// cause.
+func clientError(code codes.Code, cause error) error {
+	return uhttp.WrapErrors(code, cause.Error(), cause)
+}
+
+// TestSetUserEnabled_ErrorMapping verifies the account actions keep the gRPC code and the typed
+// cause of client errors.
 func TestSetUserEnabled_ErrorMapping(t *testing.T) {
 	boom := errors.New("boom")
 
@@ -118,9 +127,11 @@ func TestSetUserEnabled_ErrorMapping(t *testing.T) {
 		err      error
 		wantCode codes.Code
 	}{
-		{"account not found", fmt.Errorf("%w: alice", client.ErrAccountNotFound), codes.NotFound},
-		{"protected or malformed account", fmt.Errorf("%w: refusing", client.ErrInvalidAccountTarget), codes.InvalidArgument},
-		{"other failure", boom, codes.Unknown},
+		{"account not found", clientError(codes.NotFound, fmt.Errorf("%w: alice", client.ErrAccountNotFound)), codes.NotFound},
+		{"protected or malformed account", clientError(codes.InvalidArgument, fmt.Errorf("%w: refusing", client.ErrInvalidAccountTarget)), codes.InvalidArgument},
+		{"permission denied upstream", clientError(codes.PermissionDenied, boom), codes.PermissionDenied},
+		{"rate limited upstream", clientError(codes.Unavailable, boom), codes.Unavailable},
+		{"uncoded failure", boom, codes.Unknown},
 	}
 
 	for _, tt := range tests {
@@ -132,11 +143,11 @@ func TestSetUserEnabled_ErrorMapping(t *testing.T) {
 			}}
 
 			_, _, err := c.enableUser(context.Background(), userIDArgs(t, "alice"))
-			require.Error(t, err)
+			require.ErrorIs(t, err, tt.err)
 			assert.Equal(t, tt.wantCode, status.Code(err))
 
 			_, _, err = c.disableUser(context.Background(), userIDArgs(t, "alice"))
-			require.Error(t, err)
+			require.ErrorIs(t, err, tt.err)
 			assert.Equal(t, tt.wantCode, status.Code(err))
 		})
 
@@ -148,20 +159,10 @@ func TestSetUserEnabled_ErrorMapping(t *testing.T) {
 			}}
 
 			_, _, err := c.revokeTokens(context.Background(), userIDArgs(t, "alice"))
-			require.Error(t, err)
+			require.ErrorIs(t, err, tt.err)
 			assert.Equal(t, tt.wantCode, status.Code(err))
 		})
 	}
-
-	t.Run("other failure is wrapped", func(t *testing.T) {
-		c := &Connector{client: &test.MockClient{
-			SetAccountEnabledFunc: func(ctx context.Context, username string, enabled bool) error {
-				return boom
-			},
-		}}
-		_, _, err := c.disableUser(context.Background(), userIDArgs(t, "alice"))
-		require.ErrorIs(t, err, boom)
-	})
 }
 
 // TestRevokeTokens_Success verifies the action revokes the trimmed account's tokens and reports

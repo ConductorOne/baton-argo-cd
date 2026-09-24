@@ -10,8 +10,8 @@ While developing the connector, please fill out this form. This information is n
    > Yes, the connector can provision user accounts and manage role assignments (entitlements) for users.
    >
    > It can also delete ArgoCD local accounts. Deletion is permanent: it revokes the account's issued
-   > API tokens, removes its `accounts.<name>` entry from `argocd-cm`, and purges its stored credentials
-   > from `argocd-secret`.
+   > API tokens, removes its role grants from `argocd-rbac-cm`, removes its `accounts.<name>` entry
+   > from `argocd-cm`, and purges its stored credentials from `argocd-secret`.
    >
    > For reversible deactivation, the connector offers the `disable_user` and `enable_user` actions.
    > `disable_user` sets `accounts.<name>.enabled: "false"` in `argocd-cm`; the account keeps its
@@ -24,10 +24,12 @@ While developing the connector, please fill out this form. This information is n
    >
    > The connector also supports credential rotation: it sets a new random password for a local
    > account, which C1 stores in a vault. ArgoCD rejects every session and API token issued before a
-   > password change. The connector will not rotate the password of the account it authenticates as.
+   > password change.
    >
    > The built-in `admin` account cannot be disabled, enabled, rotated, stripped of its tokens or
    > deleted, and SSO/Dex identities are not local accounts so there is nothing to manage for them.
+   > The connector also refuses to disable, delete, rotate or revoke the tokens of the account it
+   > authenticates as, since it would lock itself out.
 
 ## Connector credentials
 

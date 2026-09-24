@@ -91,26 +91,31 @@ baton-argo-cd --api-url https://argocd.local --username admin --password ... \
 The connector supports credential rotation for local accounts with a random password
 (`PUT /api/v1/account/password`); C1 stores the new password in a vault, as it does for newly
 created accounts. Argo CD rejects every session and API token issued before a password change, so
-rotation also cuts off the account's existing access. The connector refuses to rotate the password
-of the account it authenticates as, since it would no longer be able to sign in.
+rotation also cuts off the account's existing access.
 
 ### Delete
 
-Deleting an account removes it permanently, in three steps:
+Deleting an account removes it permanently, in four steps:
 
 1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
-2. Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
-3. Purges the account's stored credentials - password hash, password mtime marker, and token
+2. Removes the account's role grants (`g, <name>, <role>` lines) from `policy.csv` in
+   `argocd-rbac-cm`, so an account created later with the same name does not inherit them.
+   Policy (`p`) lines that name the account are left in place. Like role revocation, rewriting
+   `policy.csv` drops its `#` comment lines.
+3. Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
+4. Purges the account's stored credentials - password hash, password mtime marker, and token
    records - from the `argocd-secret` Secret, so they are not reused if the account name is
    created again (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
 
-Deletion is idempotent: an account that is already gone, or has no stored credentials, is
-reported as successfully deleted.
+Deletion is idempotent: an account that is already gone, or has no role grants or stored
+credentials, is reported as successfully deleted.
 
 ### Notes and limitations
 
 - The built-in `admin` account cannot be disabled, enabled, rotated, stripped of its tokens or
   deleted by the connector: it is controlled by the top-level `admin.*` keys, not by `accounts.*`.
+- The connector refuses to disable, delete, rotate the password of, or revoke the tokens of the
+  account it authenticates as, since it would lock itself out of Argo CD. Enabling it is allowed.
 - SSO/Dex-managed identities are not local accounts, so there is nothing to manage for them in
   Argo CD itself.
 - Argo CD picks up `argocd-cm` changes through its settings watcher. If your deployment has that

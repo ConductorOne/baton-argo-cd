@@ -19,8 +19,7 @@ When a new account is created by C1, the account's password will be sent to a [v
 
 The connector also supports credential rotation for local accounts: C1 sets a new random password
 and sends it to a vault. ArgoCD rejects every session and API token issued before a password
-change, so rotation also cuts off the account's existing access. The connector will not rotate the
-password of the account it authenticates as.
+change, so rotation also cuts off the account's existing access.
 
 ### Connector actions
 
@@ -50,10 +49,13 @@ entry is changed through the Kubernetes API.
   touching the account itself.
 - **Rotate password** (credential rotation) sets a new random password and invalidates every
   session and API token issued before it.
-- **Delete** (account deprovisioning) is permanent. It performs three steps:
+- **Delete** (account deprovisioning) is permanent. It performs four steps:
   1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
-  2. Removes the `accounts.<name>` entry from `argocd-cm`.
-  3. Purges the account's stored credentials - its password hash, password mtime marker, and token
+  2. Removes the account's role grants from `policy.csv` in `argocd-rbac-cm`, so an account created
+     later with the same name does not inherit them. Policy (`p`) lines that name the account are
+     left in place, and rewriting `policy.csv` drops its `#` comment lines.
+  3. Removes the `accounts.<name>` entry from `argocd-cm`.
+  4. Purges the account's stored credentials - its password hash, password mtime marker, and token
      records - from the `argocd-secret` Secret, so they are not reused if the account name is
      created again.
 
@@ -64,6 +66,8 @@ Notes and limitations:
 
 - The built-in `admin` account cannot be disabled, enabled, rotated, stripped of its tokens or
   deleted. It is controlled by the top-level `admin.*` keys, not by `accounts.*`.
+- The connector refuses to disable, delete, rotate the password of, or revoke the tokens of the
+  account it authenticates as, since it would lock itself out of ArgoCD. Enabling it is allowed.
 - SSO/Dex-managed identities are not local accounts, so there is nothing for the connector to
   manage in ArgoCD itself.
 - Disabling a disabled account, enabling an enabled account, revoking the tokens of an account

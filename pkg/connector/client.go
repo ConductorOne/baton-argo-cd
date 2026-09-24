@@ -20,6 +20,7 @@ type ArgoCdClient interface {
 	// Account lifecycle.
 	RevokeAccountTokens(ctx context.Context, username string) error
 	SetAccountEnabled(ctx context.Context, username string, enabled bool) error
+	RemoveAccountRoleGrants(ctx context.Context, username string) error
 	DeleteAccount(ctx context.Context, username string) error
 	PurgeAccountCredentials(ctx context.Context, username string) error
 	RotateAccountPassword(ctx context.Context, username string, password string) error
