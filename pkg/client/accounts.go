@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
@@ -17,21 +18,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// DeprovisionMode selects what happens to an Argo CD local account when it is deprovisioned.
-//
-// Argo CD's Account REST API exposes no delete or disable RPC and `Account.enabled` is read-only
-// over the API, so both modes are applied through the Kubernetes API against the `argocd-cm`
-// ConfigMap. See https://github.com/argoproj/argo-cd/issues/4967.
-type DeprovisionMode string
-
-const (
-	// DeprovisionModeDisable keeps the account entry and sets `accounts.<name>.enabled` to "false".
-	// It is reversible and preserves the account's audit identity.
-	DeprovisionModeDisable DeprovisionMode = "disable"
-	// DeprovisionModeDelete removes the `accounts.<name>` entry from `argocd-cm` outright.
-	DeprovisionModeDelete DeprovisionMode = "delete"
-)
-
+// Argo CD's Account REST API exposes no delete, disable or enable RPC and `Account.enabled` is
+// read-only over the API, so account lifecycle changes are applied through the Kubernetes API
+// against the `argocd-cm` ConfigMap. See https://github.com/argoproj/argo-cd/issues/4967.
 const (
 	// argoCDSecretName is the Secret holding local accounts' bcrypt password hashes and token records.
 	argoCDSecretName = "argocd-secret"
@@ -45,7 +34,7 @@ const (
 	accountTokensSuffix        = ".tokens"
 
 	// adminAccountName is the built-in Argo CD admin account. It is controlled by the top-level
-	// `admin.enabled` key rather than by `accounts.*`, so it is never deprovisionable here.
+	// `admin.enabled` key rather than by `accounts.*`, so it is never managed here.
 	adminAccountName = "admin"
 
 	// accountDisabledValue is the `accounts.<name>.enabled` value that disables an account.
@@ -70,25 +59,9 @@ var accountNameRegexp = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // ErrAccountNotFound is returned when Argo CD does not know the requested account.
 var ErrAccountNotFound = errors.New("argocd-connector: account not found")
 
-// ParseDeprovisionMode normalizes a configured deprovision mode. An empty value selects the
-// default, `disable`.
-//
-// The config field carries an exact-match `in` rule, so a non-canonical spelling is rejected at
-// config validation before it reaches here. The normalization below is a backstop for callers
-// that construct a mode without going through field validation, not a documented tolerance.
-func ParseDeprovisionMode(value string) (DeprovisionMode, error) {
-	switch mode := DeprovisionMode(strings.ToLower(strings.TrimSpace(value))); mode {
-	case "":
-		return DeprovisionModeDisable, nil
-	case DeprovisionModeDisable, DeprovisionModeDelete:
-		return mode, nil
-	default:
-		return "", fmt.Errorf(
-			"argocd-connector: unsupported deprovision mode %q: must be %q or %q",
-			value, DeprovisionModeDisable, DeprovisionModeDelete,
-		)
-	}
-}
+// ErrInvalidAccountTarget is returned when an account name is malformed or names an account the
+// connector refuses to change.
+var ErrInvalidAccountTarget = errors.New("argocd-connector: invalid account target")
 
 // jsonPatchOperation is a single RFC 6902 operation. Building patches through this type (rather
 // than string formatting) keeps account names from breaking out of the JSON document.
@@ -120,40 +93,46 @@ func dataKeyPath(key string) string {
 // validateAccountName rejects names that cannot be a valid Argo CD local account.
 func validateAccountName(username string) error {
 	if username == "" {
-		return errors.New("argocd-connector: account name is required")
+		return fmt.Errorf("%w: account name is required", ErrInvalidAccountTarget)
 	}
 	if !accountNameRegexp.MatchString(username) {
 		return fmt.Errorf(
-			"argocd-connector: invalid account name %q: Argo CD local account names may only contain "+
+			"%w: invalid account name %q: Argo CD local account names may only contain "+
 				"alphanumerics, '-' and '_'",
-			username,
+			ErrInvalidAccountTarget, username,
 		)
 	}
 	return nil
 }
 
-// guardDeprovisionTarget validates an account name and refuses to deprovision protected accounts.
-func (c *Client) guardDeprovisionTarget(ctx context.Context, username string) error {
+// guardManagedAccount validates an account name and refuses to change protected accounts.
+// operation names the change ("delete", "disable", ...) for the error message.
+func guardManagedAccount(username string, operation string) error {
 	if err := validateAccountName(username); err != nil {
 		return err
 	}
 
 	if strings.EqualFold(username, adminAccountName) {
 		return fmt.Errorf(
-			"argocd-connector: refusing to deprovision the built-in %q account: it is controlled by the "+
+			"%w: refusing to %s the built-in %q account: it is controlled by the "+
 				"top-level 'admin.enabled' key in argocd-cm, not by 'accounts.*'",
-			adminAccountName,
-		)
-	}
-
-	if c.username != "" && strings.EqualFold(username, c.username) {
-		ctxzap.Extract(ctx).Warn(
-			"deprovisioning the Argo CD account the connector authenticates as; the connector will lose access",
-			zap.String("account", username),
+			ErrInvalidAccountTarget, operation, adminAccountName,
 		)
 	}
 
 	return nil
+}
+
+// warnOnSelfLockout logs a warning when a change that revokes access targets the account the
+// connector itself authenticates as.
+func (c *Client) warnOnSelfLockout(ctx context.Context, username string, operation string) {
+	if c.username != "" && strings.EqualFold(username, c.username) {
+		ctxzap.Extract(ctx).Warn(
+			"changing the Argo CD account the connector authenticates as; the connector will lose access",
+			zap.String("account", username),
+			zap.String("operation", operation),
+		)
+	}
 }
 
 // GetAccount fetches a single account from Argo CD. It returns an error wrapping
@@ -206,22 +185,20 @@ func (c *Client) GetAccount(ctx context.Context, username string) (*Account, err
 
 // RevokeAccountTokens revokes every API token issued to an Argo CD local account. This is the
 // only path that revokes a token immediately, so it must run before the account entry is removed
-// from `argocd-cm` (the API cannot resolve an account that no longer exists).
+// from `argocd-cm` (the API cannot resolve an account that no longer exists). It returns an error
+// wrapping ErrAccountNotFound when Argo CD does not know the account; tokens that are already
+// revoked are skipped.
 // Endpoint: DELETE /api/v1/account/{name}/token/{id}.
 func (c *Client) RevokeAccountTokens(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := c.guardDeprovisionTarget(ctx, username); err != nil {
+	if err := guardManagedAccount(username, "revoke API tokens of"); err != nil {
 		return err
 	}
+	c.warnOnSelfLockout(ctx, username, "revoke API tokens")
 
 	account, err := c.GetAccount(ctx, username)
 	if err != nil {
-		if errors.Is(err, ErrAccountNotFound) {
-			// Already deprovisioned: there is nothing left to revoke.
-			l.Debug("Argo CD account not found, no tokens to revoke", zap.String("account", username))
-			return nil
-		}
 		return err
 	}
 
@@ -241,6 +218,33 @@ func (c *Client) RevokeAccountTokens(ctx context.Context, username string) error
 	}
 
 	return errors.Join(errs...)
+}
+
+// RotateAccountPassword sets a new password for an Argo CD local account. Argo CD records the
+// change time and rejects every session and API token issued before it, so rotating the password
+// also cuts off existing access. It returns an error wrapping ErrAccountNotFound when Argo CD does
+// not know the account.
+//
+// The password API authenticates the change with the connector's own current password, so
+// rotating the account the connector signs in as is refused: it would leave the connector holding
+// a stale password.
+// Endpoint: PUT /api/v1/account/password.
+func (c *Client) RotateAccountPassword(ctx context.Context, username string, password string) error {
+	if err := guardManagedAccount(username, "rotate the password of"); err != nil {
+		return err
+	}
+	if c.username != "" && strings.EqualFold(username, c.username) {
+		return fmt.Errorf(
+			"%w: refusing to rotate the password of %q: the connector authenticates as this account",
+			ErrInvalidAccountTarget, username,
+		)
+	}
+
+	if _, err := c.GetAccount(ctx, username); err != nil {
+		return err
+	}
+
+	return c.UpdateUserPassword(ctx, username, password)
 }
 
 // revokeAccountToken revokes a single API token. A token Argo CD no longer knows about is treated
@@ -282,15 +286,29 @@ func (c *Client) revokeAccountToken(ctx context.Context, username string, tokenI
 	return nil
 }
 
-// DisableAccount disables an Argo CD local account by setting `accounts.<name>.enabled` to "false"
-// in the `argocd-cm` ConfigMap. Accounts are enabled when that key is absent, so the key is added
-// when it is missing and replaced otherwise. An account that is not defined in `argocd-cm`, or that
-// is already disabled, is treated as already deprovisioned.
-func (c *Client) DisableAccount(ctx context.Context, username string) error {
+// SetAccountEnabled enables or disables an Argo CD local account through its
+// `accounts.<name>.enabled` flag in the `argocd-cm` ConfigMap. Argo CD rejects both password logins
+// and API tokens of a disabled account, so the account's stored credentials are left in place and
+// re-enabling it restores access as it was.
+//
+// Disabling writes an explicit "false", adding the key when it is missing and replacing it
+// otherwise. Enabling removes the key, since an account is enabled when the key is absent; this
+// matches how Argo CD itself persists the flag. An account already in the requested state is left
+// untouched. An account that is not defined in `argocd-cm` returns an error wrapping
+// ErrAccountNotFound.
+func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled bool) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := c.guardDeprovisionTarget(ctx, username); err != nil {
+	operation := "disable"
+	if enabled {
+		operation = "enable"
+	}
+
+	if err := guardManagedAccount(username, operation); err != nil {
 		return err
+	}
+	if !enabled {
+		c.warnOnSelfLockout(ctx, username, operation)
 	}
 
 	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
@@ -304,33 +322,35 @@ func (c *Client) DisableAccount(ctx context.Context, username string) error {
 	accountKey := accountKeyPrefix + username
 	enabledKey := accountKey + accountEnabledSuffix
 
-	_, hasAccount := cm.Data[accountKey]
-	currentEnabled, hasEnabled := cm.Data[enabledKey]
+	if _, ok := cm.Data[accountKey]; !ok {
+		return fmt.Errorf("%w: %s is not defined in ConfigMap '%s'", ErrAccountNotFound, username, argoCDConfigMapName)
+	}
 
-	if !hasAccount && !hasEnabled {
-		l.Debug("Argo CD local account is not defined in the ConfigMap, nothing to disable",
+	currentValue, hasEnabled := cm.Data[enabledKey]
+	// Argo CD parses the flag with strconv.ParseBool. An unparsable value is never treated as
+	// already being in the requested state, so it gets overwritten.
+	current, parseErr := strconv.ParseBool(strings.TrimSpace(currentValue))
+	if (!hasEnabled && enabled) || (hasEnabled && parseErr == nil && current == enabled) {
+		l.Debug("Argo CD local account is already in the requested state",
 			zap.String("account", username),
-			zap.String("configmap", argoCDConfigMapName),
+			zap.Bool("enabled", enabled),
 		)
 		return nil
 	}
 
-	if hasEnabled && strings.EqualFold(strings.TrimSpace(currentEnabled), accountDisabledValue) {
-		l.Debug("Argo CD local account is already disabled", zap.String("account", username))
-		return nil
+	var op jsonPatchOperation
+	switch {
+	case enabled:
+		op = jsonPatchOperation{Op: jsonPatchOpRemove, Path: dataKeyPath(enabledKey)}
+	case hasEnabled:
+		disabled := accountDisabledValue
+		op = jsonPatchOperation{Op: jsonPatchOpReplace, Path: dataKeyPath(enabledKey), Value: &disabled}
+	default:
+		disabled := accountDisabledValue
+		op = jsonPatchOperation{Op: jsonPatchOpAdd, Path: dataKeyPath(enabledKey), Value: &disabled}
 	}
 
-	op := jsonPatchOpAdd
-	if hasEnabled {
-		op = jsonPatchOpReplace
-	}
-
-	disabled := accountDisabledValue
-	patch, err := marshalJSONPatch([]jsonPatchOperation{{
-		Op:    op,
-		Path:  dataKeyPath(enabledKey),
-		Value: &disabled,
-	}})
+	patch, err := marshalJSONPatch([]jsonPatchOperation{op})
 	if err != nil {
 		return err
 	}
@@ -339,24 +359,28 @@ func (c *Client) DisableAccount(ctx context.Context, username string) error {
 		ctx, argoCDConfigMapName, types.JSONPatchType, patch, metav1.PatchOptions{},
 	); err != nil {
 		return fmt.Errorf(
-			"argocd-connector: failed to disable account %q in ConfigMap '%s': %w",
-			username, argoCDConfigMapName, err,
+			"argocd-connector: failed to %s account %q in ConfigMap '%s': %w",
+			operation, username, argoCDConfigMapName, err,
 		)
 	}
 
-	l.Debug("Disabled Argo CD local account", zap.String("account", username))
+	l.Debug("Updated Argo CD local account state",
+		zap.String("account", username),
+		zap.Bool("enabled", enabled),
+	)
 	return nil
 }
 
 // DeleteAccount removes an Argo CD local account from the `argocd-cm` ConfigMap, dropping both the
 // `accounts.<name>` capabilities entry and its `accounts.<name>.enabled` flag. An account that is
-// no longer present is treated as already deprovisioned.
+// no longer present is treated as already deleted.
 func (c *Client) DeleteAccount(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := c.guardDeprovisionTarget(ctx, username); err != nil {
+	if err := guardManagedAccount(username, "delete"); err != nil {
 		return err
 	}
+	c.warnOnSelfLockout(ctx, username, "delete")
 
 	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
 	if err != nil {
@@ -408,7 +432,7 @@ func (c *Client) DeleteAccount(ctx context.Context, username string) error {
 func (c *Client) PurgeAccountCredentials(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := c.guardDeprovisionTarget(ctx, username); err != nil {
+	if err := guardManagedAccount(username, "purge stored credentials of"); err != nil {
 		return err
 	}
 

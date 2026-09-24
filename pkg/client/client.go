@@ -540,7 +540,7 @@ func (c *Client) CreateAccount(ctx context.Context, username string, password st
 	// no read-modify-write to race against: it creates the `data` container when argocd-cm has
 	// none (the state of Argo CD's upstream install manifests, and so of any cluster with no
 	// local accounts yet), adds the account, and clears any `accounts.<name>.enabled` flag left
-	// by a previous `disable` deprovision -- a null member removes the key, and is a no-op when
+	// by a previous `disable_user` action -- a null member removes the key, and is a no-op when
 	// it is already absent. Argo CD treats an account as enabled only when that key is missing,
 	// so a stale flag would otherwise yield an account that cannot authenticate even though
 	// provisioning reported success.

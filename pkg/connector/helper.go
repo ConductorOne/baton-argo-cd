@@ -30,8 +30,8 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 		"tokens":       tokensStr,
 	}
 
-	// An unset status defaults to enabled in the SDK, which would report a deprovisioned
-	// account as active: `disable` mode leaves the account in argocd-cm with
+	// An unset status defaults to enabled in the SDK, which would report a disabled account as
+	// active: the disable_user action leaves the account in argocd-cm with
 	// accounts.<name>.enabled=false, so it keeps syncing and must carry its real state.
 	//
 	// Both the resource-level status and the user trait's own status are set. The trait field

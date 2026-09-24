@@ -9,11 +9,25 @@ While developing the connector, please fill out this form. This information is n
 2. Can the connector provision any resources? If so, which ones?
    > Yes, the connector can provision user accounts and manage role assignments (entitlements) for users.
    >
-   > It can also deprovision ArgoCD local accounts. Deprovisioning revokes the account's issued API
-   > tokens, disables (default) or deletes its `accounts.<name>` entry in `argocd-cm` depending on the
-   > configured deprovisioning mode, and purges its stored credentials from `argocd-secret`. The
-   > built-in `admin` account is not deprovisionable, and SSO/Dex identities are not local accounts so
-   > there is nothing to deprovision for them.
+   > It can also delete ArgoCD local accounts. Deletion is permanent: it revokes the account's issued
+   > API tokens, removes its `accounts.<name>` entry from `argocd-cm`, and purges its stored credentials
+   > from `argocd-secret`.
+   >
+   > For reversible deactivation, the connector offers the `disable_user` and `enable_user` actions.
+   > `disable_user` sets `accounts.<name>.enabled: "false"` in `argocd-cm`; the account keeps its
+   > password and API tokens, which ArgoCD rejects while it is disabled. `enable_user` removes the flag
+   > again, restoring access as it was. Prefer `disable_user` for access you may need to restore, and
+   > deletion to remove the account for good.
+   >
+   > The `revoke_tokens` action revokes an account's API tokens without changing anything else, for
+   > example alongside `disable_user` so a later `enable_user` does not bring old tokens back.
+   >
+   > The connector also supports credential rotation: it sets a new random password for a local
+   > account, which C1 stores in a vault. ArgoCD rejects every session and API token issued before a
+   > password change. The connector will not rotate the password of the account it authenticates as.
+   >
+   > The built-in `admin` account cannot be disabled, enabled, rotated, stripped of its tokens or
+   > deleted, and SSO/Dex identities are not local accounts so there is nothing to manage for them.
 
 ## Connector credentials
 
@@ -47,7 +61,9 @@ While developing the connector, please fill out this form. This information is n
      > - List and get users and roles.
 
    * - Create new user accounts.
-   * - Deprovision (disable or delete) local user accounts and revoke their API tokens.
+   * - Delete local user accounts and revoke their API tokens.
+   * - Disable and enable local user accounts, and revoke their API tokens.
+   * - Rotate local user account passwords.
    * - Manage role assignments for users (updating user-role mappings).
        > The built-in `admin` role has all the necessary permissions. If creating a custom role, ensure it has the appropriate permissions for `users` and `roles` resources as described in the [ArgoCD RBAC documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/).
 
@@ -57,7 +73,9 @@ While developing the connector, please fill out this form. This information is n
      >
      > - **Sync (Read-only)**: Requires permissions to `get` and `list` users and roles.
      > - **Provision (Read-Write)**: Requires all read permissions, plus permissions to `create` users and `update` user-role assignments.
-     > - **Deprovision (Read-Write)**: Requires all provision permissions, plus `accounts, update` in ArgoCD RBAC (to revoke API tokens) and Kubernetes `get`/`patch` on the `argocd-secret` Secret (to purge stored credentials).
+     > - **Disable / enable actions (Read-Write)**: Require Kubernetes `get`/`patch` on the `argocd-cm` ConfigMap, already needed for provisioning.
+     > - **Revoke tokens action and password rotation (Read-Write)**: Require `accounts, update` in ArgoCD RBAC.
+     > - **Delete (Read-Write)**: Requires all provision permissions, plus `accounts, update` in ArgoCD RBAC (to revoke API tokens) and Kubernetes `get`/`patch` on the `argocd-secret` Secret (to purge stored credentials).
 
    - What level of access or permissions does the user need in order to create the credentials? (For example, must be a super administrator, must have access to the admin console, etc.)
      > To create a user with the necessary permissions in ArgoCD, you need to be an administrator of the ArgoCD instance. This is typically done by logging in as the `admin` user or another user with equivalent administrative privileges.
@@ -96,8 +114,8 @@ When deploying the connector in the same Kubernetes cluster and namespace as Arg
 
    The connector needs permissions to read and modify ArgoCD ConfigMaps, and to read and patch the ArgoCD Secret. Create a Role that grants access to the following objects:
    - `argocd-rbac-cm` ConfigMap: Contains RBAC policies and role grants (needs read and write access)
-   - `argocd-cm` ConfigMap: Contains ArgoCD configuration including user accounts (needs write access for provisioning and deprovisioning)
-   - `argocd-secret` Secret: Contains local accounts' password hashes and API token records (needs read and write access for deprovisioning)
+   - `argocd-cm` ConfigMap: Contains ArgoCD configuration including user accounts (needs write access for provisioning, deprovisioning and the enable/disable actions)
+   - `argocd-secret` Secret: Contains local accounts' password hashes and API token records (needs read and write access for account deletion)
 
    ```yaml
    apiVersion: rbac.authorization.k8s.io/v1
@@ -120,7 +138,7 @@ When deploying the connector in the same Kubernetes cluster and namespace as Arg
    - `list`: List ConfigMaps in the namespace (required to discover and access the ConfigMaps)
    - `patch`: Partially update ConfigMaps (used to modify RBAC policies and user accounts)
    - `update`: Fully update ConfigMaps (used as an alternative to patch for modifying ConfigMaps)
-   - `get`/`patch` on `secrets`: Read and purge a deprovisioned account's stored credentials (password hash and API token records) in `argocd-secret`. Only needed for account deprovisioning.
+   - `get`/`patch` on `secrets`: Read and purge a deleted account's stored credentials (password hash and API token records) in `argocd-secret`. Only needed for account deletion.
 
    Apply with:
    ```bash
@@ -226,7 +244,7 @@ kubectl auth can-i patch configmaps/argocd-rbac-cm -n argocd --as=system:service
 # Check if the ServiceAccount can update the ArgoCD ConfigMap
 kubectl auth can-i patch configmaps/argocd-cm -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
 
-# Check if the ServiceAccount can read and update the ArgoCD Secret (account deprovisioning)
+# Check if the ServiceAccount can read and update the ArgoCD Secret (account deletion)
 kubectl auth can-i get secrets/argocd-secret -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
 kubectl auth can-i patch secrets/argocd-secret -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
 ```

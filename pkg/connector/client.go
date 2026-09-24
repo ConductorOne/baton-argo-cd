@@ -17,9 +17,10 @@ type ArgoCdClient interface {
 	UpdateUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
 	RemoveUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
 	GetRoleSubjects(ctx context.Context, roleName string) ([]string, error)
-	// Account deprovisioning.
+	// Account lifecycle.
 	RevokeAccountTokens(ctx context.Context, username string) error
-	DisableAccount(ctx context.Context, username string) error
+	SetAccountEnabled(ctx context.Context, username string, enabled bool) error
 	DeleteAccount(ctx context.Context, username string) error
 	PurgeAccountCredentials(ctx context.Context, username string) error
+	RotateAccountPassword(ctx context.Context, username string, password string) error
 }

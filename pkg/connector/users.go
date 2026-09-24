@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,20 +17,19 @@ import (
 
 // Compile-time assertions that userBuilder still satisfies the SDK interfaces it is registered
 // for. The SDK discovers capabilities by type assertion, so a drifting method signature would
-// otherwise silently drop account provisioning or deprovisioning from the connector.
+// otherwise silently drop account creation, deletion or credential rotation from the connector.
 var (
-	_ connectorbuilder.ResourceSyncer  = (*userBuilder)(nil)
-	_ connectorbuilder.AccountManager  = (*userBuilder)(nil)
-	_ connectorbuilder.ResourceDeleter = (*userBuilder)(nil)
+	_ connectorbuilder.ResourceSyncer    = (*userBuilder)(nil)
+	_ connectorbuilder.AccountManager    = (*userBuilder)(nil)
+	_ connectorbuilder.ResourceDeleter   = (*userBuilder)(nil)
+	_ connectorbuilder.CredentialManager = (*userBuilder)(nil)
 )
 
-// userBuilder implements the ResourceSyncer, AccountManager and ResourceDeleter interfaces for
-// Argo CD users.
+// userBuilder implements the ResourceSyncer, AccountManager, ResourceDeleter and CredentialManager
+// interfaces for Argo CD users.
 type userBuilder struct {
 	resourceType *v2.ResourceType
 	client       ArgoCdClient
-	// deprovisionMode decides whether Delete disables or removes the local account entry.
-	deprovisionMode client.DeprovisionMode
 }
 
 // ResourceType returns the resource type for users.
@@ -116,64 +116,100 @@ func (u *userBuilder) CreateAccount(
 	}, []*v2.PlaintextData{passwordResult}, annos, nil
 }
 
-// Delete deprovisions an Argo CD local account, closing the leaver half of the account lifecycle.
+// Delete permanently removes an Argo CD local account. Reversible deactivation is the
+// disable_user action instead (see actions.go).
 //
-// Argo CD's Account REST API has no delete or disable endpoint, so the account entry is changed
-// through the Kubernetes API against `argocd-cm`. Deprovisioning runs in three steps, in this order:
+// Argo CD's Account REST API has no delete endpoint, so the account entry is removed through the
+// Kubernetes API. Deletion runs in three steps, in this order:
 //
 //  1. Revoke the account's issued API tokens through the Argo CD API. This is the only immediate
 //     revocation path, and it needs the account to still be resolvable through the API.
-//  2. Disable or delete the `accounts.<name>` entry in `argocd-cm`, per the configured mode.
+//  2. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
 //  3. Purge the account's stored credentials (password hash and token records) from `argocd-secret`,
-//     so no residual access path survives the account.
+//     so they are not silently reused if the account name is recreated.
 //
-// Each step treats an already-deprovisioned state as success, so a retried deprovision converges
-// instead of failing.
+// Each step treats an already-deleted state as success, so a retried delete converges instead of
+// failing.
 func (u *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
 	if rt := resourceId.GetResourceType(); rt != userResourceType.Id {
 		return nil, fmt.Errorf(
-			"baton-argo-cd: cannot deprovision resource type %q: only %q resources can be deprovisioned",
+			"baton-argo-cd: cannot delete resource type %q: only %q resources can be deleted",
 			rt, userResourceType.Id,
 		)
 	}
 
 	username := strings.TrimSpace(resourceId.GetResource())
 	if username == "" {
-		return nil, fmt.Errorf("baton-argo-cd: cannot deprovision account: resource id is empty")
+		return nil, fmt.Errorf("baton-argo-cd: cannot delete account: resource id is empty")
 	}
 
-	if err := u.client.RevokeAccountTokens(ctx, username); err != nil {
+	// An account Argo CD no longer knows has no tokens left to revoke.
+	if err := u.client.RevokeAccountTokens(ctx, username); err != nil && !errors.Is(err, client.ErrAccountNotFound) {
 		return nil, fmt.Errorf("baton-argo-cd: failed to revoke API tokens for account %q: %w", username, err)
 	}
 
-	switch u.deprovisionMode {
-	case client.DeprovisionModeDelete:
-		if err := u.client.DeleteAccount(ctx, username); err != nil {
-			return nil, fmt.Errorf("baton-argo-cd: failed to delete account %q: %w", username, err)
-		}
-	case client.DeprovisionModeDisable:
-		if err := u.client.DisableAccount(ctx, username); err != nil {
-			return nil, fmt.Errorf("baton-argo-cd: failed to disable account %q: %w", username, err)
-		}
-	default:
-		return nil, fmt.Errorf(
-			"baton-argo-cd: unsupported deprovision mode %q: must be %q or %q",
-			u.deprovisionMode, client.DeprovisionModeDisable, client.DeprovisionModeDelete,
-		)
+	if err := u.client.DeleteAccount(ctx, username); err != nil {
+		return nil, fmt.Errorf("baton-argo-cd: failed to delete account %q: %w", username, err)
 	}
 
 	if err := u.client.PurgeAccountCredentials(ctx, username); err != nil {
 		return nil, fmt.Errorf("baton-argo-cd: failed to purge stored credentials for account %q: %w", username, err)
 	}
 
-	l.Info("Deprovisioned Argo CD local account",
-		zap.String("account", username),
-		zap.String("deprovision_mode", string(u.deprovisionMode)),
-	)
+	l.Info("Deleted Argo CD local account", zap.String("account", username))
 
 	return nil, nil
+}
+
+// RotateCapabilityDetails reports the credential options supported for password rotation.
+func (u *userBuilder) RotateCapabilityDetails(ctx context.Context) (*v2.CredentialDetailsCredentialRotation, annotations.Annotations, error) {
+	return &v2.CredentialDetailsCredentialRotation{
+		SupportedCredentialOptions: []v2.CapabilityDetailCredentialOption{
+			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
+		},
+		PreferredCredentialOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
+	}, nil, nil
+}
+
+// Rotate sets a new random password for an Argo CD local account and returns it so C1 can store
+// it in a vault. Argo CD rejects every session and API token issued before a password change, so
+// rotation also cuts off the account's existing access.
+func (u *userBuilder) Rotate(
+	ctx context.Context,
+	resourceId *v2.ResourceId,
+	credentialOptions *v2.LocalCredentialOptions,
+) ([]*v2.PlaintextData, annotations.Annotations, error) {
+	if rt := resourceId.GetResourceType(); rt != userResourceType.Id {
+		return nil, nil, fmt.Errorf(
+			"baton-argo-cd: cannot rotate credentials of resource type %q: only %q resources are supported",
+			rt, userResourceType.Id,
+		)
+	}
+
+	username := strings.TrimSpace(resourceId.GetResource())
+	if username == "" {
+		return nil, nil, fmt.Errorf("baton-argo-cd: cannot rotate credentials: resource id is empty")
+	}
+
+	password, err := generateCredentials(credentialOptions)
+	if err != nil {
+		return nil, nil, fmt.Errorf("baton-argo-cd: failed to generate password: %w", err)
+	}
+
+	if err := u.client.RotateAccountPassword(ctx, username, password); err != nil {
+		return nil, nil, fmt.Errorf("baton-argo-cd: failed to rotate password for account %q: %w", username, err)
+	}
+
+	ctxzap.Extract(ctx).Info("Rotated Argo CD local account password", zap.String("account", username))
+
+	return []*v2.PlaintextData{
+		{
+			Name:  "password",
+			Bytes: []byte(password),
+		},
+	}, nil, nil
 }
 
 // extractUsername safely retrieves the username from the AccountInfo protobuf message.
@@ -197,15 +233,10 @@ func (u *userBuilder) extractUsername(accountInfo *v2.AccountInfo) (string, erro
 	return "", fmt.Errorf("username is required")
 }
 
-// newUserBuilder creates a new userBuilder instance. An empty deprovisionMode selects the
-// default, client.DeprovisionModeDisable.
-func newUserBuilder(cli ArgoCdClient, deprovisionMode client.DeprovisionMode) *userBuilder {
-	if deprovisionMode == "" {
-		deprovisionMode = client.DeprovisionModeDisable
-	}
+// newUserBuilder creates a new userBuilder instance.
+func newUserBuilder(client ArgoCdClient) *userBuilder {
 	return &userBuilder{
-		resourceType:    userResourceType,
-		client:          cli,
-		deprovisionMode: deprovisionMode,
+		resourceType: userResourceType,
+		client:       client,
 	}
 }

@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConnector_Capabilities verifies the SDK discovers account deprovisioning on the user
-// resource type. The SDK derives capabilities by type-asserting the resource syncers, so this
+// TestConnector_Capabilities verifies the SDK discovers account deletion on the user resource
+// type, credential rotation, and the account actions on the connector. The SDK derives capabilities by type-asserting the resource syncers, so this
 // guards the wiring rather than just the method body.
 func TestConnector_Capabilities(t *testing.T) {
 	ctx := context.Background()
@@ -27,6 +27,7 @@ func TestConnector_Capabilities(t *testing.T) {
 	require.NotNil(t, capabilities)
 
 	assert.Contains(t, capabilities.GetConnectorCapabilities(), v2.Capability_CAPABILITY_RESOURCE_DELETE)
+	assert.Contains(t, capabilities.GetConnectorCapabilities(), v2.Capability_CAPABILITY_ACTIONS)
 
 	var userCapabilities []v2.Capability
 	for _, rtc := range capabilities.GetResourceTypeCapabilities() {
@@ -39,7 +40,8 @@ func TestConnector_Capabilities(t *testing.T) {
 	assert.Contains(t, userCapabilities, v2.Capability_CAPABILITY_SYNC)
 	assert.Contains(t, userCapabilities, v2.Capability_CAPABILITY_ACCOUNT_PROVISIONING)
 	assert.Contains(t, userCapabilities, v2.Capability_CAPABILITY_RESOURCE_DELETE)
-	// Deprovisioning must not imply resource creation: Argo CD accounts are created through the
+	assert.Contains(t, userCapabilities, v2.Capability_CAPABILITY_CREDENTIAL_ROTATION)
+	// Deletion must not imply resource creation: Argo CD accounts are created through the
 	// account-provisioning path, not CreateResource.
 	assert.NotContains(t, userCapabilities, v2.Capability_CAPABILITY_RESOURCE_CREATE)
 }

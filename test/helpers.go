@@ -31,9 +31,10 @@ type MockClient struct {
 
 	// Account deprovisioning.
 	RevokeAccountTokensFunc     func(ctx context.Context, username string) error
-	DisableAccountFunc          func(ctx context.Context, username string) error
+	SetAccountEnabledFunc       func(ctx context.Context, username string, enabled bool) error
 	DeleteAccountFunc           func(ctx context.Context, username string) error
 	PurgeAccountCredentialsFunc func(ctx context.Context, username string) error
+	RotateAccountPasswordFunc   func(ctx context.Context, username string, password string) error
 }
 
 // RevokeAccountTokens calls the mock method if it is defined.
@@ -44,10 +45,10 @@ func (m *MockClient) RevokeAccountTokens(ctx context.Context, username string) e
 	return nil
 }
 
-// DisableAccount calls the mock method if it is defined.
-func (m *MockClient) DisableAccount(ctx context.Context, username string) error {
-	if m.DisableAccountFunc != nil {
-		return m.DisableAccountFunc(ctx, username)
+// SetAccountEnabled calls the mock method if it is defined.
+func (m *MockClient) SetAccountEnabled(ctx context.Context, username string, enabled bool) error {
+	if m.SetAccountEnabledFunc != nil {
+		return m.SetAccountEnabledFunc(ctx, username, enabled)
 	}
 	return nil
 }
@@ -61,6 +62,14 @@ func (m *MockClient) DeleteAccount(ctx context.Context, username string) error {
 }
 
 // PurgeAccountCredentials calls the mock method if it is defined.
+// RotateAccountPassword calls the mock method if it is defined.
+func (m *MockClient) RotateAccountPassword(ctx context.Context, username string, password string) error {
+	if m.RotateAccountPasswordFunc != nil {
+		return m.RotateAccountPasswordFunc(ctx, username, password)
+	}
+	return nil
+}
+
 func (m *MockClient) PurgeAccountCredentials(ctx context.Context, username string) error {
 	if m.PurgeAccountCredentialsFunc != nil {
 		return m.PurgeAccountCredentialsFunc(ctx, username)

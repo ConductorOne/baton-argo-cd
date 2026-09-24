@@ -26,7 +26,8 @@
       "capabilities": [
         "CAPABILITY_SYNC",
         "CAPABILITY_ACCOUNT_PROVISIONING",
-        "CAPABILITY_RESOURCE_DELETE"
+        "CAPABILITY_RESOURCE_DELETE",
+        "CAPABILITY_CREDENTIAL_ROTATION"
       ],
       "permissions": {}
     }
@@ -35,10 +36,18 @@
     "CAPABILITY_PROVISION",
     "CAPABILITY_SYNC",
     "CAPABILITY_ACCOUNT_PROVISIONING",
-    "CAPABILITY_RESOURCE_DELETE"
+    "CAPABILITY_CREDENTIAL_ROTATION",
+    "CAPABILITY_RESOURCE_DELETE",
+    "CAPABILITY_ACTIONS"
   ],
   "credentialDetails": {
     "capabilityAccountProvisioning": {
+      "supportedCredentialOptions": [
+        "CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD"
+      ],
+      "preferredCredentialOption": "CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD"
+    },
+    "capabilityCredentialRotation": {
       "supportedCredentialOptions": [
         "CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD"
       ],

@@ -10,7 +10,6 @@ type ArgoCd struct {
 	Kubeconfig []byte `mapstructure:"kubeconfig"`
 	InsecureSkipVerify bool `mapstructure:"insecure-skip-verify"`
 	CaCertPath []byte `mapstructure:"ca-cert-path"`
-	DeprovisionMode string `mapstructure:"deprovision-mode"`
 }
 
 func (c *ArgoCd) findFieldByTag(tagValue string) (any, bool) {

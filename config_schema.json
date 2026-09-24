@@ -151,21 +151,6 @@
           ""
         ]
       }
-    },
-    {
-      "name": "deprovision-mode",
-      "displayName": "Account deprovisioning mode",
-      "description": "How to deprovision an Argo CD local account: 'disable' keeps the account entry in argocd-cm and sets accounts.\u003cname\u003e.enabled=false (reversible, preserves audit identity), 'delete' removes the account entry outright. Stored credentials (password entry and API tokens) are purged in both modes. The value is case-sensitive and must be exactly 'disable' or 'delete'.",
-      "placeholder": "disable",
-      "stringField": {
-        "defaultValue": "disable",
-        "rules": {
-          "in": [
-            "disable",
-            "delete"
-          ]
-        }
-      }
     }
   ],
   "constraints": [

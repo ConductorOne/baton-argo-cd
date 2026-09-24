@@ -14,14 +14,12 @@ import (
 
 type Connector struct {
 	client ArgoCdClient
-	// deprovisionMode decides whether account deprovisioning disables or deletes the local account.
-	deprovisionMode client.DeprovisionMode
 }
 
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
 func (c *Connector) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
 	return []connectorbuilder.ResourceSyncer{
-		newUserBuilder(c.client, c.deprovisionMode),
+		newUserBuilder(c.client),
 		newRoleBuilder(c.client),
 	}
 }
@@ -36,8 +34,8 @@ func (d *Connector) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.R
 func (d *Connector) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
 		DisplayName: "Argo CD",
-		Description: "Connector syncs data about accounts and roles, creates and deprovisions local accounts, " +
-			"and manages role assignments in Argo CD.",
+		Description: "Connector syncs data about accounts and roles, creates, deletes, enables and disables " +
+			"local accounts, and manages role assignments in Argo CD.",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
 				"username": {
@@ -63,11 +61,6 @@ func (d *Connector) Validate(ctx context.Context) (annotations.Annotations, erro
 
 // New returns a new instance of the connector.
 func New(ctx context.Context, config *cfg.ArgoCd) (*Connector, error) {
-	deprovisionMode, err := client.ParseDeprovisionMode(config.DeprovisionMode)
-	if err != nil {
-		return nil, err
-	}
-
 	cli, err := client.NewClient(
 		ctx,
 		config.ApiUrl,
@@ -81,7 +74,6 @@ func New(ctx context.Context, config *cfg.ArgoCd) (*Connector, error) {
 		return nil, fmt.Errorf("failed to create Argo CD client: %w", err)
 	}
 	return &Connector{
-		client:          cli,
-		deprovisionMode: deprovisionMode,
+		client: cli,
 	}, nil
 }

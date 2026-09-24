@@ -111,18 +111,18 @@ If you need to use a different URL (e.g., external ingress), update the `BATON_A
 The connector needs the following permissions in the `argocd` namespace:
 - **GET** on `argocd-rbac-cm` ConfigMap (to read RBAC policies)
 - **PATCH/UPDATE** on `argocd-rbac-cm` ConfigMap (to update role grants)
-- **PATCH/UPDATE** on `argocd-cm` ConfigMap (to create, disable and delete accounts)
+- **PATCH/UPDATE** on `argocd-cm` ConfigMap (to create, enable, disable and delete accounts)
 - **GET** on the `argocd-secret` Secret (to read stored account credentials)
-- **PATCH** on the `argocd-secret` Secret (to purge a deprovisioned account's credentials)
+- **PATCH** on the `argocd-secret` Secret (to purge a deleted account's credentials)
 
 These are defined in the `role.yaml` manifest. The Secret rule is restricted to `argocd-secret`
 by name, so the connector cannot read the repository and cluster credentials that also live in
 the `argocd` namespace.
 
 > **Upgrading an existing deployment:** the `argocd-secret` permissions are new. Re-apply
-> `role.yaml` before account deprovisioning is used. Without them the final step of a
-> deprovision fails with a `403`, leaving the account already disabled or deleted but its
-> stored credentials still present.
+> `role.yaml` before account deletion is used. Without them the final step of a delete fails
+> with a `403`, leaving the account already removed from `argocd-cm` but its stored credentials
+> still present.
 
 ## Troubleshooting
 
@@ -135,7 +135,7 @@ kubectl get serviceaccount baton-argo-cd -n argocd
 ```bash
 kubectl auth can-i get configmaps/argocd-rbac-cm -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
 kubectl auth can-i patch configmaps/argocd-rbac-cm -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
-# Required for account deprovisioning
+# Required for account deletion
 kubectl auth can-i get secrets/argocd-secret -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
 kubectl auth can-i patch secrets/argocd-secret -n argocd --as=system:serviceaccount:argocd:baton-argo-cd
 ```

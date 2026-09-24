@@ -38,60 +38,95 @@ data:
 
 See [ArgoCD RBAC documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/) for details.
 
-## Account Deprovisioning
+## Account Lifecycle
 
-The connector deprovisions Argo CD **local accounts** (`accounts.*` entries in `argocd-cm`).
-Argo CD's Account API has no delete or disable endpoint and `Account.enabled` is read-only over
-the API, so the account entry is changed through the Kubernetes API
-(see [argoproj/argo-cd#4967](https://github.com/argoproj/argo-cd/issues/4967)).
+The connector manages the lifecycle of Argo CD **local accounts** (`accounts.*` entries in
+`argocd-cm`). Argo CD's Account API has no delete, disable or enable endpoint and
+`Account.enabled` is read-only over the API, so the account entry is changed through the
+Kubernetes API (see [argoproj/argo-cd#4967](https://github.com/argoproj/argo-cd/issues/4967)).
 
-Deprovisioning an account performs three steps:
+| Operation | How it is triggered | Reversible |
+|-----------|---------------------|------------|
+| Disable | `disable_user` action | Yes, with `enable_user` |
+| Enable | `enable_user` action | - |
+| Revoke API tokens | `revoke_tokens` action | No |
+| Rotate password | Credential rotation (`CAPABILITY_CREDENTIAL_ROTATION`) | No |
+| Delete | Account deletion (`CAPABILITY_RESOURCE_DELETE`) | No |
 
-1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
-2. Disables or deletes the account entry in `argocd-cm`, per `--deprovision-mode`.
-3. Purges the account's stored credentials - password hash, password mtime marker, and token
-   records - from the `argocd-secret` Secret, so no residual access path survives the account
-   (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
+### Disable and enable (actions)
 
-`--deprovision-mode` controls step 2:
+`disable_user` sets `accounts.<name>.enabled: "false"` in `argocd-cm`. Argo CD rejects both
+password logins and API tokens of a disabled account, so the account's password and tokens are
+left in place. `enable_user` removes the flag again (an account is enabled when the key is
+absent), restoring access exactly as it was.
 
-| Mode | Behavior |
-|------|----------|
-| `disable` (default) | Sets `accounts.<name>.enabled: "false"`. Reversible and preserves the account's audit identity. Accounts are enabled when the key is absent, so it is added when missing. |
-| `delete` | Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`. |
+Both actions take one argument, `user_id`: the account name.
 
 ```bash
-# Default: disable the account, keeping the entry for audit purposes
-baton-argo-cd --api-url https://argocd.local --username admin --password ...   --deprovision-mode disable
+baton-argo-cd --api-url https://argocd.local --username admin --password ... \
+  --invoke-action disable_user --invoke-action-args '{"user_id":"alice"}'
 
-# Remove the account entry outright
-baton-argo-cd --api-url https://argocd.local --username admin --password ...   --deprovision-mode delete
+baton-argo-cd --api-url https://argocd.local --username admin --password ... \
+  --invoke-action enable_user --invoke-action-args '{"user_id":"alice"}'
 ```
 
-Notes and limitations:
+An account that is already in the requested state is reported as success. An account that is not
+defined in `argocd-cm` fails with a not-found error.
 
-- The built-in `admin` account is **not** deprovisionable: it is controlled by the top-level
-  `admin.enabled` key in `argocd-cm`, not by `accounts.*`. Deprovisioning it is rejected.
-- SSO/Dex-managed identities are not local accounts, so there is nothing to deprovision for them
-  in Argo CD itself.
-- Because credentials are purged in both modes, re-enabling a disabled account requires setting a
-  new password.
-- Deprovisioning is idempotent: an account that is already disabled, already deleted, or has no
-  stored credentials is reported as successfully deprovisioned.
+### Revoke API tokens (action)
+
+`revoke_tokens` revokes every API token issued to the account
+(`DELETE /api/v1/account/{name}/token/{id}`). The account, its password and its enabled state are
+left unchanged, so it pairs with `disable_user` when a disabled account must not get its old
+tokens back on `enable_user`. It takes the same `user_id` argument. An account with no tokens left
+is reported as success; an account Argo CD does not know fails with a not-found error.
+
+```bash
+baton-argo-cd --api-url https://argocd.local --username admin --password ... \
+  --invoke-action revoke_tokens --invoke-action-args '{"user_id":"alice"}'
+```
+
+### Rotate password (credential rotation)
+
+The connector supports credential rotation for local accounts with a random password
+(`PUT /api/v1/account/password`); C1 stores the new password in a vault, as it does for newly
+created accounts. Argo CD rejects every session and API token issued before a password change, so
+rotation also cuts off the account's existing access. The connector refuses to rotate the password
+of the account it authenticates as, since it would no longer be able to sign in.
+
+### Delete
+
+Deleting an account removes it permanently, in three steps:
+
+1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
+2. Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
+3. Purges the account's stored credentials - password hash, password mtime marker, and token
+   records - from the `argocd-secret` Secret, so they are not reused if the account name is
+   created again (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
+
+Deletion is idempotent: an account that is already gone, or has no stored credentials, is
+reported as successfully deleted.
+
+### Notes and limitations
+
+- The built-in `admin` account cannot be disabled, enabled, rotated, stripped of its tokens or
+  deleted by the connector: it is controlled by the top-level `admin.*` keys, not by `accounts.*`.
+- SSO/Dex-managed identities are not local accounts, so there is nothing to manage for them in
+  Argo CD itself.
 - Argo CD picks up `argocd-cm` changes through its settings watcher. If your deployment has that
   watcher disabled, restart `argocd-server` (`kubectl rollout restart deployment argocd-server -n argocd`)
   for the change to take effect.
 
 ### Kubernetes permissions
 
-Deprovisioning needs `get` and `patch` on the `argocd-secret` Secret in addition to the ConfigMap
-permissions used by sync and provisioning. The Secret rule is restricted to `argocd-secret` by
+Account deletion needs `get` and `patch` on the `argocd-secret` Secret in addition to the ConfigMap
+permissions used by sync, provisioning and the enable/disable actions. The Secret rule is restricted to `argocd-secret` by
 name so the connector cannot read the repository and cluster credentials that also live in the
 `argocd` namespace.
 
 **Upgrading an existing deployment:** these Secret permissions are new. Re-apply the role before
-deprovisioning is used — without them the credential-purge step fails with a `403` after the
-account has already been disabled or deleted, leaving its stored credentials in place.
+account deletion is used — without them the credential-purge step fails with a `403` after the
+account has already been deleted, leaving its stored credentials in place.
 
 ```yaml
 rules:
@@ -105,14 +140,14 @@ rules:
 ```
 
 The Argo CD account used by the connector also needs the `accounts, update` RBAC permission to
-revoke API tokens.
+revoke API tokens and to rotate other accounts' passwords.
 
 ### Account names
 
 Account names may contain only alphanumerics, `-` and `_`. Argo CD stores each local account as
 an `accounts.<name>` key in `argocd-cm` and splits those keys on `.`, so a name containing a dot
 is not addressable as an account — `accounts.john.smith` is parsed as a `smith` property of an
-account named `john`. Provisioning and deprovisioning both reject such names outright rather than
+account named `john`. Provisioning, deletion, rotation and the account actions all reject such names outright rather than
 writing a key Argo CD would silently ignore.
 
 ## TLS Configuration
@@ -164,8 +199,8 @@ baton resources
 - Users
 - Roles
 
-This connector supports account provisioning and deprovisioning for users, and entitlement
-provisioning for roles.
+This connector supports account creation, deletion and password rotation for users, the
+`enable_user`, `disable_user` and `revoke_tokens` actions, and entitlement provisioning for roles.
 
 # Contributing, Support and Issues
 
@@ -194,7 +229,6 @@ Flags:
       --username  string             The username used to authenticate with Argo CD
       --password  string             The password used to authenticate with Argo CD
       --api-url   string             The API URL
-      --deprovision-mode string      How to deprovision a local account: disable or delete (default "disable")
       --client-id string             The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string         The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
   -f, --file string                  The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")

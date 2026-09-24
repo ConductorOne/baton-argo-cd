@@ -66,33 +66,6 @@ func getSecretData(t *testing.T, k8sClient kubernetes.Interface) map[string][]by
 	return secret.Data
 }
 
-// TestParseDeprovisionMode covers normalization of the configured deprovision mode.
-func TestParseDeprovisionMode(t *testing.T) {
-	t.Run("empty defaults to disable", func(t *testing.T) {
-		mode, err := ParseDeprovisionMode("")
-		require.NoError(t, err)
-		assert.Equal(t, DeprovisionModeDisable, mode)
-	})
-
-	t.Run("normalizes case and whitespace", func(t *testing.T) {
-		mode, err := ParseDeprovisionMode("  DELETE ")
-		require.NoError(t, err)
-		assert.Equal(t, DeprovisionModeDelete, mode)
-	})
-
-	t.Run("disable", func(t *testing.T) {
-		mode, err := ParseDeprovisionMode("disable")
-		require.NoError(t, err)
-		assert.Equal(t, DeprovisionModeDisable, mode)
-	})
-
-	t.Run("rejects unknown mode", func(t *testing.T) {
-		_, err := ParseDeprovisionMode("purge")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `unsupported deprovision mode "purge"`)
-	})
-}
-
 // TestJSONPointerEscape verifies JSON Pointer escaping of reserved characters.
 func TestJSONPointerEscape(t *testing.T) {
 	assert.Equal(t, "accounts.alice", jsonPointerEscape("accounts.alice"))
@@ -101,9 +74,20 @@ func TestJSONPointerEscape(t *testing.T) {
 	assert.Equal(t, "/data/accounts.alice.enabled", dataKeyPath("accounts.alice.enabled"))
 }
 
-// TestDisableAccount_AddsEnabledKey verifies that disabling an account whose `enabled` key is
-// absent adds it as "false" (Argo CD treats a missing key as enabled).
-func TestDisableAccount_AddsEnabledKey(t *testing.T) {
+// patchCount returns how many patch requests the fake clientset recorded.
+func patchCount(k8sClient *fake.Clientset) int {
+	var n int
+	for _, action := range k8sClient.Actions() {
+		if action.GetVerb() == "patch" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSetAccountEnabled_DisableAddsEnabledKey verifies that disabling an account whose `enabled`
+// key is absent adds it as "false" (Argo CD treats a missing key as enabled).
+func TestSetAccountEnabled_DisableAddsEnabledKey(t *testing.T) {
 	ctx := context.Background()
 	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
 		"accounts.alice": "apiKey, login",
@@ -111,7 +95,7 @@ func TestDisableAccount_AddsEnabledKey(t *testing.T) {
 	}))
 
 	cli := newTestClient(k8sClient, "https://test.com", nil)
-	require.NoError(t, cli.DisableAccount(ctx, "alice"))
+	require.NoError(t, cli.SetAccountEnabled(ctx, "alice", false))
 
 	data := getConfigMapData(t, k8sClient)
 	assert.Equal(t, "false", data["accounts.alice.enabled"])
@@ -122,79 +106,135 @@ func TestDisableAccount_AddsEnabledKey(t *testing.T) {
 	assert.NotContains(t, data, "accounts.bob.enabled")
 }
 
-// TestDisableAccount_ReplacesEnabledKey verifies that an explicit `enabled: true` is replaced.
-func TestDisableAccount_ReplacesEnabledKey(t *testing.T) {
-	ctx := context.Background()
-	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
-		"accounts.alice":         "apiKey, login",
-		"accounts.alice.enabled": "true",
-	}))
+// TestSetAccountEnabled_DisableReplacesEnabledKey verifies that an explicit `enabled: true`, or a
+// value Argo CD cannot parse, is replaced with "false".
+func TestSetAccountEnabled_DisableReplacesEnabledKey(t *testing.T) {
+	for _, current := range []string{"true", "yes"} {
+		t.Run(current, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
+				"accounts.alice":         "apiKey, login",
+				"accounts.alice.enabled": current,
+			}))
 
-	cli := newTestClient(k8sClient, "https://test.com", nil)
-	require.NoError(t, cli.DisableAccount(ctx, "alice"))
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+			require.NoError(t, cli.SetAccountEnabled(ctx, "alice", false))
 
-	assert.Equal(t, "false", getConfigMapData(t, k8sClient)["accounts.alice.enabled"])
+			assert.Equal(t, "false", getConfigMapData(t, k8sClient)["accounts.alice.enabled"])
+		})
+	}
 }
 
-// TestDisableAccount_AlreadyDisabled verifies that re-disabling an account succeeds without a
-// second write, so a retried deprovision converges.
-func TestDisableAccount_AlreadyDisabled(t *testing.T) {
+// TestSetAccountEnabled_DisableLeavesCredentials verifies that disabling does not touch the
+// account's stored password or token records, so enabling it again restores access.
+func TestSetAccountEnabled_DisableLeavesCredentials(t *testing.T) {
 	ctx := context.Background()
-	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
-		"accounts.alice":         "apiKey, login",
-		"accounts.alice.enabled": "false",
-	}))
+	secretData := map[string][]byte{
+		"accounts.alice.password": []byte("hash"),
+		"accounts.alice.tokens":   []byte(`[{"id":"t1"}]`),
+	}
+	k8sClient := fake.NewSimpleClientset(
+		newArgoCDConfigMap(map[string]string{"accounts.alice": "apiKey, login"}),
+		newArgoCDSecret(secretData),
+	)
 
 	cli := newTestClient(k8sClient, "https://test.com", nil)
-	require.NoError(t, cli.DisableAccount(ctx, "alice"))
+	require.NoError(t, cli.SetAccountEnabled(ctx, "alice", false))
 
-	assert.Equal(t, "false", getConfigMapData(t, k8sClient)["accounts.alice.enabled"])
+	assert.Equal(t, secretData, getSecretData(t, k8sClient))
+}
 
-	var patched bool
-	for _, action := range k8sClient.Actions() {
-		if action.GetVerb() == "patch" {
-			patched = true
+// TestSetAccountEnabled_EnableRemovesEnabledKey verifies that enabling a disabled account removes
+// the flag, which is how Argo CD itself persists an enabled account.
+func TestSetAccountEnabled_EnableRemovesEnabledKey(t *testing.T) {
+	for _, current := range []string{"false", "0", "yes"} {
+		t.Run(current, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
+				"accounts.alice":         "apiKey, login",
+				"accounts.alice.enabled": current,
+				"accounts.bob":           "login",
+				"accounts.bob.enabled":   "false",
+			}))
+
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+			require.NoError(t, cli.SetAccountEnabled(ctx, "alice", true))
+
+			data := getConfigMapData(t, k8sClient)
+			assert.NotContains(t, data, "accounts.alice.enabled")
+			assert.Equal(t, "apiKey, login", data["accounts.alice"])
+			assert.Equal(t, "false", data["accounts.bob.enabled"])
+		})
+	}
+}
+
+// TestSetAccountEnabled_AlreadyInState verifies that an account already in the requested state
+// succeeds without a write.
+func TestSetAccountEnabled_AlreadyInState(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    map[string]string
+		enabled bool
+	}{
+		{"disable already disabled", map[string]string{"accounts.alice": "login", "accounts.alice.enabled": "false"}, false},
+		{"disable already disabled, non-canonical", map[string]string{"accounts.alice": "login", "accounts.alice.enabled": "FALSE"}, false},
+		{"enable without flag", map[string]string{"accounts.alice": "login"}, true},
+		{"enable explicit true", map[string]string{"accounts.alice": "login", "accounts.alice.enabled": "true"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(tt.data))
+
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+			require.NoError(t, cli.SetAccountEnabled(ctx, "alice", tt.enabled))
+
+			assert.Equal(t, tt.data, getConfigMapData(t, k8sClient))
+			assert.Zero(t, patchCount(k8sClient), "an account already in the requested state should not be patched")
+		})
+	}
+}
+
+// TestSetAccountEnabled_AccountNotDefined verifies that an account missing from argocd-cm is
+// reported as not found rather than silently succeeding.
+func TestSetAccountEnabled_AccountNotDefined(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		for name, data := range map[string]map[string]string{
+			"other accounts only": {"accounts.bob": "login"},
+			"stale flag only":     {"accounts.alice.enabled": "false"},
+			"no data":             nil,
+		} {
+			t.Run(fmt.Sprintf("%s/enabled=%t", name, enabled), func(t *testing.T) {
+				ctx := context.Background()
+				k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(data))
+
+				cli := newTestClient(k8sClient, "https://test.com", nil)
+				err := cli.SetAccountEnabled(ctx, "alice", enabled)
+				require.ErrorIs(t, err, ErrAccountNotFound)
+				assert.Zero(t, patchCount(k8sClient))
+			})
 		}
 	}
-	assert.False(t, patched, "already-disabled account should not be patched again")
 }
 
-// TestDisableAccount_AccountNotDefined verifies that an account missing from argocd-cm is treated
-// as already deprovisioned rather than an error.
-func TestDisableAccount_AccountNotDefined(t *testing.T) {
-	ctx := context.Background()
-	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
-		"accounts.bob": "login",
-	}))
-
-	cli := newTestClient(k8sClient, "https://test.com", nil)
-	require.NoError(t, cli.DisableAccount(ctx, "alice"))
-
-	assert.NotContains(t, getConfigMapData(t, k8sClient), "accounts.alice.enabled")
-}
-
-// TestDisableAccount_NilConfigMapData verifies the empty-ConfigMap case does not attempt a patch
-// against a non-existent /data object.
-func TestDisableAccount_NilConfigMapData(t *testing.T) {
-	ctx := context.Background()
-	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(nil))
-
-	cli := newTestClient(k8sClient, "https://test.com", nil)
-	require.NoError(t, cli.DisableAccount(ctx, "alice"))
-}
-
-// TestDeprovision_AdminGuard verifies the built-in admin account is not deprovisionable through
-// any of the deprovisioning operations.
-func TestDeprovision_AdminGuard(t *testing.T) {
+// TestManagedAccount_AdminGuard verifies the built-in admin account cannot be changed through any
+// of the account lifecycle operations.
+func TestManagedAccount_AdminGuard(t *testing.T) {
 	ctx := context.Background()
 	k8sClient := fake.NewSimpleClientset(
-		newArgoCDConfigMap(map[string]string{"accounts.admin": "apiKey, login"}),
+		newArgoCDConfigMap(map[string]string{"accounts.admin": "apiKey, login", "accounts.admin.enabled": "false"}),
 		newArgoCDSecret(map[string][]byte{"accounts.admin.password": []byte("hash")}),
 	)
 	cli := newTestClient(k8sClient, "https://test.com", nil)
 
 	operations := map[string]func(context.Context, string) error{
-		"DisableAccount":          cli.DisableAccount,
+		"SetAccountEnabled(false)": func(ctx context.Context, username string) error {
+			return cli.SetAccountEnabled(ctx, username, false)
+		},
+		"SetAccountEnabled(true)": func(ctx context.Context, username string) error {
+			return cli.SetAccountEnabled(ctx, username, true)
+		},
 		"DeleteAccount":           cli.DeleteAccount,
 		"PurgeAccountCredentials": cli.PurgeAccountCredentials,
 		"RevokeAccountTokens":     cli.RevokeAccountTokens,
@@ -204,30 +244,33 @@ func TestDeprovision_AdminGuard(t *testing.T) {
 		for _, target := range []string{"admin", "ADMIN"} {
 			t.Run(fmt.Sprintf("%s/%s", name, target), func(t *testing.T) {
 				err := operation(ctx, target)
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), `refusing to deprovision the built-in "admin" account`)
+				require.ErrorIs(t, err, ErrInvalidAccountTarget)
+				assert.Contains(t, err.Error(), `the built-in "admin" account`)
 			})
 		}
 	}
 
 	// Nothing was written for the guarded account.
-	assert.Equal(t, "apiKey, login", getConfigMapData(t, k8sClient)["accounts.admin"])
+	data := getConfigMapData(t, k8sClient)
+	assert.Equal(t, "apiKey, login", data["accounts.admin"])
+	assert.Equal(t, "false", data["accounts.admin.enabled"])
 	assert.Contains(t, getSecretData(t, k8sClient), "accounts.admin.password")
 }
 
-// TestDeprovision_RejectsInvalidAccountName verifies account names that cannot name a real Argo CD
-// local account are rejected before any patch is built.
-func TestDeprovision_RejectsInvalidAccountName(t *testing.T) {
+// TestManagedAccount_RejectsInvalidAccountName verifies account names that cannot name a real
+// Argo CD local account are rejected before any patch is built.
+func TestManagedAccount_RejectsInvalidAccountName(t *testing.T) {
 	ctx := context.Background()
 	k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{"accounts.alice": "login"}))
 	cli := newTestClient(k8sClient, "https://test.com", nil)
 
 	for _, username := range []string{"", "alice/../bob", `alice", "x": "y`, "alice bob"} {
 		t.Run(fmt.Sprintf("%q", username), func(t *testing.T) {
-			require.Error(t, cli.DisableAccount(ctx, username))
-			require.Error(t, cli.DeleteAccount(ctx, username))
-			require.Error(t, cli.PurgeAccountCredentials(ctx, username))
-			require.Error(t, cli.RevokeAccountTokens(ctx, username))
+			require.ErrorIs(t, cli.SetAccountEnabled(ctx, username, false), ErrInvalidAccountTarget)
+			require.ErrorIs(t, cli.SetAccountEnabled(ctx, username, true), ErrInvalidAccountTarget)
+			require.ErrorIs(t, cli.DeleteAccount(ctx, username), ErrInvalidAccountTarget)
+			require.ErrorIs(t, cli.PurgeAccountCredentials(ctx, username), ErrInvalidAccountTarget)
+			require.ErrorIs(t, cli.RevokeAccountTokens(ctx, username), ErrInvalidAccountTarget)
 		})
 	}
 
@@ -412,9 +455,9 @@ func TestRevokeAccountTokens_RevokesEveryToken(t *testing.T) {
 	assert.ElementsMatch(t, []string{"t1", "t2"}, revoked)
 }
 
-// TestRevokeAccountTokens_AccountAlreadyGone verifies an account Argo CD no longer knows about is
-// treated as already deprovisioned.
-func TestRevokeAccountTokens_AccountAlreadyGone(t *testing.T) {
+// TestRevokeAccountTokens_AccountNotFound verifies an account Argo CD does not know about is
+// reported as not found, so callers can decide whether that counts as success.
+func TestRevokeAccountTokens_AccountNotFound(t *testing.T) {
 	ctx := context.Background()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -422,11 +465,92 @@ func TestRevokeAccountTokens_AccountAlreadyGone(t *testing.T) {
 	defer srv.Close()
 
 	cli := newTestClient(fake.NewSimpleClientset(), srv.URL, srv.Client())
-	require.NoError(t, cli.RevokeAccountTokens(ctx, "alice"))
+	require.ErrorIs(t, cli.RevokeAccountTokens(ctx, "alice"), ErrAccountNotFound)
+}
+
+// passwordAPIServer fakes the Argo CD account endpoints used by RotateAccountPassword. Accounts
+// in known resolve; every password update is recorded.
+func passwordAPIServer(t *testing.T, known map[string]bool, updateStatus int) (*httptest.Server, *[]UpdateUserPasswordRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var updates []UpdateUserPasswordRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == updateUserPasswordURL:
+			var body UpdateUserPasswordRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			mu.Lock()
+			updates = append(updates, body)
+			mu.Unlock()
+			w.WriteHeader(updateStatus)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, getAccountsURL+"/"):
+			name := strings.TrimPrefix(r.URL.Path, getAccountsURL+"/")
+			if !known[name] {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "enabled": true})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &updates
+}
+
+// TestRotateAccountPassword_Success verifies the new password is set for the named account,
+// authenticated with the connector's own password.
+func TestRotateAccountPassword_Success(t *testing.T) {
+	srv, updates := passwordAPIServer(t, map[string]bool{"alice": true}, http.StatusOK)
+
+	cli := newTestClient(fake.NewSimpleClientset(), srv.URL, srv.Client())
+	require.NoError(t, cli.RotateAccountPassword(context.Background(), "alice", "n3w-pass"))
+
+	require.Len(t, *updates, 1)
+	assert.Equal(t, UpdateUserPasswordRequest{CurrentPassword: "password", Name: "alice", NewPassword: "n3w-pass"}, (*updates)[0])
+}
+
+// TestRotateAccountPassword_AccountNotFound verifies an unknown account is reported as not found
+// without attempting the password update.
+func TestRotateAccountPassword_AccountNotFound(t *testing.T) {
+	srv, updates := passwordAPIServer(t, nil, http.StatusOK)
+
+	cli := newTestClient(fake.NewSimpleClientset(), srv.URL, srv.Client())
+	require.ErrorIs(t, cli.RotateAccountPassword(context.Background(), "alice", "n3w-pass"), ErrAccountNotFound)
+	assert.Empty(t, *updates)
+}
+
+// TestRotateAccountPassword_UpdateFails verifies a rejected password update surfaces as an error.
+func TestRotateAccountPassword_UpdateFails(t *testing.T) {
+	srv, _ := passwordAPIServer(t, map[string]bool{"alice": true}, http.StatusBadRequest)
+
+	cli := newTestClient(fake.NewSimpleClientset(), srv.URL, srv.Client())
+	err := cli.RotateAccountPassword(context.Background(), "alice", "n3w-pass")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 400")
+}
+
+// TestRotateAccountPassword_RefusesProtectedAccounts verifies the admin account, the account the
+// connector signs in as, and malformed names are refused before any request is made.
+func TestRotateAccountPassword_RefusesProtectedAccounts(t *testing.T) {
+	srv, updates := passwordAPIServer(t, map[string]bool{"admin": true, "svc-baton": true}, http.StatusOK)
+
+	cli := newTestClient(fake.NewSimpleClientset(), srv.URL, srv.Client())
+	cli.username = "svc-baton"
+
+	for _, username := range []string{"admin", "ADMIN", "svc-baton", "SVC-BATON", "", "alice.enabled"} {
+		t.Run(username, func(t *testing.T) {
+			require.ErrorIs(t, cli.RotateAccountPassword(context.Background(), username, "n3w-pass"), ErrInvalidAccountTarget)
+		})
+	}
+	assert.Empty(t, *updates)
 }
 
 // TestRevokeAccountTokens_TokenAlreadyRevoked verifies a token that is already gone does not fail
-// the deprovision.
+// the delete.
 func TestRevokeAccountTokens_TokenAlreadyRevoked(t *testing.T) {
 	ctx := context.Background()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -515,7 +639,7 @@ func TestMarshalJSONPatch(t *testing.T) {
 }
 
 // TestCreateAccount_ClearsStaleEnabledFlag verifies that re-provisioning an account that was
-// previously deprovisioned in `disable` mode clears the leftover `accounts.<name>.enabled: false`
+// previously disabled through the disable_user action clears the leftover `accounts.<name>.enabled: false`
 // key. Argo CD treats an account as enabled only when the key is absent, so leaving it behind
 // would produce an account that cannot authenticate even though provisioning reported success.
 func TestCreateAccount_ClearsStaleEnabledFlag(t *testing.T) {
@@ -547,7 +671,7 @@ func TestCreateAccount_ClearsStaleEnabledFlag(t *testing.T) {
 }
 
 // TestCreateAccount_RejectsInvalidAccountName verifies the create path validates account names
-// with the same rules as the deprovision path, so a name cannot collide with another account's
+// with the same rules as the delete and enable/disable paths, so a name cannot collide with another account's
 // suffix namespace -- `accounts.alice.enabled` is alice's enabled flag, not an account.
 func TestCreateAccount_RejectsInvalidAccountName(t *testing.T) {
 	ctx := context.Background()
@@ -566,11 +690,11 @@ func TestCreateAccount_RejectsInvalidAccountName(t *testing.T) {
 	}
 }
 
-// TestDeprovision_RejectsDottedAccountName verifies that a dotted name is refused on every
-// deprovision path. Argo CD splits `accounts.*` keys on "." and only accepts two- and three-part
+// TestManagedAccount_RejectsDottedAccountName verifies that a dotted name is refused on every
+// account lifecycle path. Argo CD splits `accounts.*` keys on "." and only accepts two- and three-part
 // keys, so no real account name contains a dot -- and accepting one would let `alice.enabled`
 // address the *enabled flag* of the separate account `alice`.
-func TestDeprovision_RejectsDottedAccountName(t *testing.T) {
+func TestManagedAccount_RejectsDottedAccountName(t *testing.T) {
 	ctx := context.Background()
 
 	for _, username := range []string{"alice.enabled", "john.smith", "admin.enabled", ".", "alice."} {
@@ -586,7 +710,8 @@ func TestDeprovision_RejectsDottedAccountName(t *testing.T) {
 			)
 			cli := newTestClient(k8sClient, "https://test.com", nil)
 
-			require.Error(t, cli.DisableAccount(ctx, username))
+			require.Error(t, cli.SetAccountEnabled(ctx, username, false))
+			require.Error(t, cli.SetAccountEnabled(ctx, username, true))
 			require.Error(t, cli.DeleteAccount(ctx, username))
 			require.Error(t, cli.PurgeAccountCredentials(ctx, username))
 			require.Error(t, cli.RevokeAccountTokens(ctx, username))
