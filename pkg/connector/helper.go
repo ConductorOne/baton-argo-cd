@@ -30,15 +30,12 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 		"tokens":       tokensStr,
 	}
 
-	accountTraits := []resource.UserTraitOption{
-		resource.WithUserProfile(profile),
-	}
-
 	return resource.NewUserResource(
 		account.Name,
 		userResourceType,
 		account.Name,
-		accountTraits,
+		nil,
+		resource.WithResourceProfile(profile),
 	)
 }
 

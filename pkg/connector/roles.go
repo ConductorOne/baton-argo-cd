@@ -44,7 +44,8 @@ func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 			role.Name,
 			roleResourceType,
 			role.Name,
-			[]resource.RoleTraitOption{resource.WithRoleProfile(profile)},
+			nil,
+			resource.WithResourceProfile(profile),
 		)
 		if err != nil {
 			return nil, "", annos, err
