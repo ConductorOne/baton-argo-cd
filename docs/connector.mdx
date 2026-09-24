@@ -51,9 +51,10 @@ entry is changed through the Kubernetes API.
   session and API token issued before it.
 - **Delete** (account deprovisioning) is permanent. It performs four steps:
   1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
-  2. Removes the account's role grants from `policy.csv` in `argocd-rbac-cm`, so an account created
-     later with the same name does not inherit them. Policy (`p`) lines that name the account are
-     left in place, and rewriting `policy.csv` drops its `#` comment lines.
+  2. Removes the account's role grants and direct permissions (every `g` and `p` line whose subject
+     is the account) from `policy.csv` in `argocd-rbac-cm`, so an account created later with the
+     same name inherits neither. Rewriting `policy.csv` normalizes its formatting and drops its `#`
+     comment lines.
   3. Removes the `accounts.<name>` entry from `argocd-cm`.
   4. Purges the account's stored credentials - its password hash, password mtime marker, and token
      records - from the `argocd-secret` Secret, so they are not reused if the account name is

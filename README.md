@@ -98,16 +98,16 @@ rotation also cuts off the account's existing access.
 Deleting an account removes it permanently, in four steps:
 
 1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
-2. Removes the account's role grants (`g, <name>, <role>` lines) from `policy.csv` in
-   `argocd-rbac-cm`, so an account created later with the same name does not inherit them.
-   Policy (`p`) lines that name the account are left in place. Like role revocation, rewriting
-   `policy.csv` drops its `#` comment lines.
+2. Removes every `policy.csv` line in `argocd-rbac-cm` whose subject is the account - its role
+   grants (`g, <name>, <role>`) and its direct permissions (`p, <name>, ...`) - so an account
+   created later with the same name inherits neither. Only exact name matches are removed. Like
+   role revocation, rewriting `policy.csv` normalizes its formatting and drops `#` comment lines.
 3. Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
 4. Purges the account's stored credentials - password hash, password mtime marker, and token
    records - from the `argocd-secret` Secret, so they are not reused if the account name is
    created again (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
 
-Deletion is idempotent: an account that is already gone, or has no role grants or stored
+Deletion is idempotent: an account that is already gone, or has no RBAC policies or stored
 credentials, is reported as successfully deleted.
 
 ### Notes and limitations

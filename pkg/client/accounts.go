@@ -340,14 +340,15 @@ func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled
 	return nil
 }
 
-// RemoveAccountRoleGrants removes every role grant (`g, <name>, <role>` line) for an account from
-// `policy.csv` in `argocd-rbac-cm`. Without this the grants outlive a deleted account and are
-// inherited by any account later created with the same name. Policy (`p`) lines are left
-// untouched. An account with no grants is left as is.
-func (c *Client) RemoveAccountRoleGrants(ctx context.Context, username string) error {
+// RemoveAccountPolicies removes every `policy.csv` line in `argocd-rbac-cm` whose subject is the
+// account: its role grants (`g, <name>, <role>`) and its direct permissions
+// (`p, <name>, <resource>, <action>, <object>, <effect>`). Without this they outlive a deleted
+// account and apply to any account later created with the same name. Only exact subject matches
+// are removed. An account with no policy lines is left as is.
+func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
-	if err := c.guardManagedAccount(username, "remove the role grants of", true); err != nil {
+	if err := c.guardManagedAccount(username, "remove the RBAC policies of", true); err != nil {
 		return err
 	}
 
@@ -358,7 +359,7 @@ func (c *Client) RemoveAccountRoleGrants(ctx context.Context, username string) e
 
 	policyCsv, ok := cm.Data[policyCSVKey]
 	if !ok {
-		l.Debug("RBAC ConfigMap has no policy, no role grants to remove", zap.String("account", username))
+		l.Debug("RBAC ConfigMap has no policy, no account policies to remove", zap.String("account", username))
 		return nil
 	}
 
@@ -370,7 +371,10 @@ func (c *Client) RemoveAccountRoleGrants(ctx context.Context, username string) e
 	kept := make([][]string, 0, len(records))
 	var removed int
 	for _, record := range records {
-		if len(record) > 2 && record[0] == policyTypeGrant && record[1] == username {
+		isAccountLine := len(record) > 2 &&
+			(record[0] == policyTypeGrant || record[0] == policyTypeDefinition) &&
+			record[1] == username
+		if isAccountLine {
 			removed++
 			continue
 		}
@@ -378,17 +382,17 @@ func (c *Client) RemoveAccountRoleGrants(ctx context.Context, username string) e
 	}
 
 	if removed == 0 {
-		l.Debug("Argo CD local account has no role grants to remove", zap.String("account", username))
+		l.Debug("Argo CD local account has no RBAC policies to remove", zap.String("account", username))
 		return nil
 	}
 
 	if err := c.updateRBACPolicy(ctx, kept, true); err != nil {
-		return kubernetesError(err, fmt.Sprintf("argocd-connector: failed to remove role grants of account %q", username))
+		return kubernetesError(err, fmt.Sprintf("argocd-connector: failed to remove RBAC policies of account %q", username))
 	}
 
-	l.Debug("Removed Argo CD local account role grants",
+	l.Debug("Removed Argo CD local account RBAC policies",
 		zap.String("account", username),
-		zap.Int("removed_grants", removed),
+		zap.Int("removed_lines", removed),
 	)
 	return nil
 }

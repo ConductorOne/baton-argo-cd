@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -169,15 +170,15 @@ func TestKubernetesErrors_Codes(t *testing.T) {
 			want:      codes.NotFound,
 		},
 		{
-			name: "role grants, rbac configmap get forbidden", verb: "get", resource: "configmaps",
+			name: "rbac policies, rbac configmap get forbidden", verb: "get", resource: "configmaps",
 			err:       apierrors.NewForbidden(configMaps, rbacConfigMapName, nil),
-			operation: func(c *Client) error { return c.RemoveAccountRoleGrants(context.Background(), "alice") },
+			operation: func(c *Client) error { return c.RemoveAccountPolicies(context.Background(), "alice") },
 			want:      codes.PermissionDenied,
 		},
 		{
-			name: "role grants, rbac configmap patch unavailable", verb: "patch", resource: "configmaps",
+			name: "rbac policies, rbac configmap patch unavailable", verb: "patch", resource: "configmaps",
 			err:       apierrors.NewServiceUnavailable("api server down"),
-			operation: func(c *Client) error { return c.RemoveAccountRoleGrants(context.Background(), "alice") },
+			operation: func(c *Client) error { return c.RemoveAccountPolicies(context.Background(), "alice") },
 			want:      codes.Unavailable,
 		},
 	}
@@ -211,7 +212,7 @@ func TestManagedAccount_RefusesSelfLockout(t *testing.T) {
 		"DeleteAccount":            func(u string) error { return cli.DeleteAccount(ctx, u) },
 		"PurgeAccountCredentials":  func(u string) error { return cli.PurgeAccountCredentials(ctx, u) },
 		"RevokeAccountTokens":      func(u string) error { return cli.RevokeAccountTokens(ctx, u) },
-		"RemoveAccountRoleGrants":  func(u string) error { return cli.RemoveAccountRoleGrants(ctx, u) },
+		"RemoveAccountPolicies":    func(u string) error { return cli.RemoveAccountPolicies(ctx, u) },
 		"RotateAccountPassword":    func(u string) error { return cli.RotateAccountPassword(ctx, u, "n3w-pass") },
 	}
 
@@ -241,10 +242,10 @@ func TestManagedAccount_AdminErrorCode(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
-// TestRemoveAccountRoleGrants verifies only the account's own role grants are removed: other
-// subjects' grants, including names that merely start with the account's, and policy lines naming
-// the account are kept.
-func TestRemoveAccountRoleGrants(t *testing.T) {
+// TestRemoveAccountPolicies verifies the account's own role grants and direct permissions are
+// removed, while other subjects' lines -- including names that merely start with the account's --
+// and role definitions are kept.
+func TestRemoveAccountPolicies(t *testing.T) {
 	policy := strings.Join([]string{
 		"# team roles",
 		"p, role:dev, applications, get, */*, allow",
@@ -253,12 +254,13 @@ func TestRemoveAccountRoleGrants(t *testing.T) {
 		"g, bob, role:dev",
 		"g, alice-admin, role:ops",
 		"p, alice, applications, sync, default/*, allow",
+		"p, alice-admin, applications, delete, default/*, allow",
 		"",
 	}, "\n")
 	k8sClient := fake.NewSimpleClientset(newRBACConfigMap(&policy))
 
 	cli := newTestClient(k8sClient, "https://test.com", nil)
-	require.NoError(t, cli.RemoveAccountRoleGrants(context.Background(), "alice"))
+	require.NoError(t, cli.RemoveAccountPolicies(context.Background(), "alice"))
 
 	records, err := parsePolicyCSV(getRBACPolicy(t, k8sClient))
 	require.NoError(t, err)
@@ -266,24 +268,41 @@ func TestRemoveAccountRoleGrants(t *testing.T) {
 		{"p", "role:dev", "applications", "get", "*/*", "allow"},
 		{"g", "bob", "role:dev"},
 		{"g", "alice-admin", "role:ops"},
-		{"p", "alice", "applications", "sync", "default/*", "allow"},
+		{"p", "alice-admin", "applications", "delete", "default/*", "allow"},
 	}, records)
 }
 
-// TestRemoveAccountRoleGrants_NothingToRemove verifies an account with no grants, or an RBAC
+// TestRemoveAccountPolicies_NothingToRemove verifies an account with no policy lines, or an RBAC
 // ConfigMap with no policy at all, leaves the ConfigMap untouched.
-func TestRemoveAccountRoleGrants_NothingToRemove(t *testing.T) {
+func TestRemoveAccountPolicies_NothingToRemove(t *testing.T) {
 	otherPolicy := "g, bob, role:dev\n"
 	for name, policy := range map[string]*string{
-		"no grants for account": &otherPolicy,
-		"no policy":             nil,
+		"no policy lines for account": &otherPolicy,
+		"no policy":                   nil,
 	} {
 		t.Run(name, func(t *testing.T) {
 			k8sClient := fake.NewSimpleClientset(newRBACConfigMap(policy))
 
 			cli := newTestClient(k8sClient, "https://test.com", nil)
-			require.NoError(t, cli.RemoveAccountRoleGrants(context.Background(), "alice"))
+			require.NoError(t, cli.RemoveAccountPolicies(context.Background(), "alice"))
 			assert.Zero(t, patchCount(k8sClient))
 		})
 	}
+}
+
+// TestCodedErrors_MessageNotRepeated verifies a coded error states its cause once, both on its own
+// and after a caller wraps it, while keeping the gRPC code and the typed cause.
+func TestCodedErrors_MessageNotRepeated(t *testing.T) {
+	cli := newTestClient(fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{"accounts.bob": "login"})), "https://test.com", nil)
+
+	err := cli.SetAccountEnabled(context.Background(), "ghost", false)
+	require.ErrorIs(t, err, ErrAccountNotFound)
+	assert.Equal(t, 1, strings.Count(err.Error(), "ghost is not defined"))
+
+	wrapped := fmt.Errorf("baton-argo-cd: failed to disable account %q: %w", "ghost", err)
+	st, ok := status.FromError(wrapped)
+	require.True(t, ok)
+	assert.Equal(t, codes.NotFound, st.Code())
+	assert.Equal(t, 1, strings.Count(st.Message(), "ghost is not defined"))
+	require.ErrorIs(t, wrapped, ErrAccountNotFound)
 }

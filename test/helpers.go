@@ -32,7 +32,7 @@ type MockClient struct {
 	// Account deprovisioning.
 	RevokeAccountTokensFunc     func(ctx context.Context, username string) error
 	SetAccountEnabledFunc       func(ctx context.Context, username string, enabled bool) error
-	RemoveAccountRoleGrantsFunc func(ctx context.Context, username string) error
+	RemoveAccountPoliciesFunc func(ctx context.Context, username string) error
 	DeleteAccountFunc           func(ctx context.Context, username string) error
 	PurgeAccountCredentialsFunc func(ctx context.Context, username string) error
 	RotateAccountPasswordFunc   func(ctx context.Context, username string, password string) error
@@ -54,10 +54,10 @@ func (m *MockClient) SetAccountEnabled(ctx context.Context, username string, ena
 	return nil
 }
 
-// RemoveAccountRoleGrants calls the mock method if it is defined.
-func (m *MockClient) RemoveAccountRoleGrants(ctx context.Context, username string) error {
-	if m.RemoveAccountRoleGrantsFunc != nil {
-		return m.RemoveAccountRoleGrantsFunc(ctx, username)
+// RemoveAccountPolicies calls the mock method if it is defined.
+func (m *MockClient) RemoveAccountPolicies(ctx context.Context, username string) error {
+	if m.RemoveAccountPoliciesFunc != nil {
+		return m.RemoveAccountPoliciesFunc(ctx, username)
 	}
 	return nil
 }

@@ -210,7 +210,7 @@ func createProfile(data map[string]interface{}) *structpb.Struct {
 }
 
 // TestUserBuilder_Delete verifies the hard-delete sequence: tokens are revoked through the API,
-// role grants are removed from argocd-rbac-cm, the account entry is removed from argocd-cm, and
+// RBAC policies are removed from argocd-rbac-cm, the account entry is removed from argocd-cm, and
 // stored credentials are purged -- in that order.
 func TestUserBuilder_Delete(t *testing.T) {
 	var calls []string
@@ -224,9 +224,9 @@ func TestUserBuilder_Delete(t *testing.T) {
 			calls = append(calls, "set-enabled")
 			return nil
 		},
-		RemoveAccountRoleGrantsFunc: func(ctx context.Context, username string) error {
+		RemoveAccountPoliciesFunc: func(ctx context.Context, username string) error {
 			assert.Equal(t, "alice", username)
-			calls = append(calls, "remove-role-grants")
+			calls = append(calls, "remove-policies")
 			return nil
 		},
 		DeleteAccountFunc: func(ctx context.Context, username string) error {
@@ -248,7 +248,7 @@ func TestUserBuilder_Delete(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Nil(t, annos)
-	assert.Equal(t, []string{"revoke-tokens", "remove-role-grants", "delete", "purge-credentials"}, calls)
+	assert.Equal(t, []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}, calls)
 }
 
 // TestUserBuilder_Delete_Validation verifies malformed targets are rejected before any client call.
@@ -259,7 +259,7 @@ func TestUserBuilder_Delete_Validation(t *testing.T) {
 	}
 	mockCli := &test.MockClient{
 		RevokeAccountTokensFunc:     failOnCall,
-		RemoveAccountRoleGrantsFunc: failOnCall,
+		RemoveAccountPoliciesFunc:   failOnCall,
 		DeleteAccountFunc:           failOnCall,
 		PurgeAccountCredentialsFunc: failOnCall,
 	}
@@ -290,9 +290,9 @@ func TestUserBuilder_Delete_PropagatesErrors(t *testing.T) {
 		wantCalls []string
 	}{
 		{"token revocation fails", "revoke-tokens", "failed to revoke API tokens", []string{"revoke-tokens"}},
-		{"role grant removal fails", "remove-role-grants", "failed to remove role grants", []string{"revoke-tokens", "remove-role-grants"}},
-		{"delete fails", "delete", "failed to delete account", []string{"revoke-tokens", "remove-role-grants", "delete"}},
-		{"credential purge fails", "purge-credentials", "failed to purge stored credentials", []string{"revoke-tokens", "remove-role-grants", "delete", "purge-credentials"}},
+		{"policy removal fails", "remove-policies", "failed to remove RBAC policies", []string{"revoke-tokens", "remove-policies"}},
+		{"delete fails", "delete", "failed to delete account", []string{"revoke-tokens", "remove-policies", "delete"}},
+		{"credential purge fails", "purge-credentials", "failed to purge stored credentials", []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}},
 	}
 
 	for _, tt := range tests {
@@ -309,7 +309,7 @@ func TestUserBuilder_Delete_PropagatesErrors(t *testing.T) {
 			}
 			mockCli := &test.MockClient{
 				RevokeAccountTokensFunc:     step("revoke-tokens"),
-				RemoveAccountRoleGrantsFunc: step("remove-role-grants"),
+				RemoveAccountPoliciesFunc:   step("remove-policies"),
 				DeleteAccountFunc:           step("delete"),
 				PurgeAccountCredentialsFunc: step("purge-credentials"),
 			}
@@ -326,7 +326,7 @@ func TestUserBuilder_Delete_PropagatesErrors(t *testing.T) {
 }
 
 // TestUserBuilder_Delete_AccountUnknownToAPI verifies an account Argo CD no longer resolves does
-// not block the rest of the delete, so stale role grants, argocd-cm and argocd-secret entries
+// not block the rest of the delete, so stale RBAC policies, argocd-cm and argocd-secret entries
 // still get cleaned.
 func TestUserBuilder_Delete_AccountUnknownToAPI(t *testing.T) {
 	var calls []string
@@ -335,8 +335,8 @@ func TestUserBuilder_Delete_AccountUnknownToAPI(t *testing.T) {
 			calls = append(calls, "revoke-tokens")
 			return uhttp.WrapErrors(codes.NotFound, "not found", fmt.Errorf("%w: %s", client.ErrAccountNotFound, username))
 		},
-		RemoveAccountRoleGrantsFunc: func(ctx context.Context, username string) error {
-			calls = append(calls, "remove-role-grants")
+		RemoveAccountPoliciesFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "remove-policies")
 			return nil
 		},
 		DeleteAccountFunc: func(ctx context.Context, username string) error {
@@ -354,7 +354,7 @@ func TestUserBuilder_Delete_AccountUnknownToAPI(t *testing.T) {
 		Resource:     "alice",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"revoke-tokens", "remove-role-grants", "delete", "purge-credentials"}, calls)
+	assert.Equal(t, []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}, calls)
 }
 
 func randomPasswordOptions(length int64) *v2.LocalCredentialOptions {

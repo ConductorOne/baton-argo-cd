@@ -10,7 +10,7 @@ While developing the connector, please fill out this form. This information is n
    > Yes, the connector can provision user accounts and manage role assignments (entitlements) for users.
    >
    > It can also delete ArgoCD local accounts. Deletion is permanent: it revokes the account's issued
-   > API tokens, removes its role grants from `argocd-rbac-cm`, removes its `accounts.<name>` entry
+   > API tokens, removes its role grants and direct permissions from `argocd-rbac-cm`, removes its `accounts.<name>` entry
    > from `argocd-cm`, and purges its stored credentials from `argocd-secret`.
    >
    > For reversible deactivation, the connector offers the `disable_user` and `enable_user` actions.

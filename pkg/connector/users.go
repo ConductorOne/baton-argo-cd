@@ -126,12 +126,12 @@ func (u *userBuilder) CreateAccount(
 //
 //  1. Revoke the account's issued API tokens through the Argo CD API. This is the only immediate
 //     revocation path, and it needs the account to still be resolvable through the API.
-//  2. Remove the account's role grants from `policy.csv` in `argocd-rbac-cm`.
+//  2. Remove the account's role grants and direct permissions from `policy.csv` in `argocd-rbac-cm`.
 //  3. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
 //  4. Purge the account's stored credentials (password hash and token records) from `argocd-secret`.
 //
 // Steps 2 and 4 keep a later account created with the same name from inheriting the old
-// account's roles and credentials.
+// account's roles, permissions and credentials.
 //
 // Each step treats an already-deleted state as success, so a retried delete converges instead of
 // failing.
@@ -155,8 +155,8 @@ func (u *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (an
 		return nil, fmt.Errorf("baton-argo-cd: failed to revoke API tokens for account %q: %w", username, err)
 	}
 
-	if err := u.client.RemoveAccountRoleGrants(ctx, username); err != nil {
-		return nil, fmt.Errorf("baton-argo-cd: failed to remove role grants for account %q: %w", username, err)
+	if err := u.client.RemoveAccountPolicies(ctx, username); err != nil {
+		return nil, fmt.Errorf("baton-argo-cd: failed to remove RBAC policies for account %q: %w", username, err)
 	}
 
 	if err := u.client.DeleteAccount(ctx, username); err != nil {
