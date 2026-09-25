@@ -28,6 +28,62 @@ type MockClient struct {
 	GetRoleSubjectsFunc        func(ctx context.Context, roleID string) ([]string, error)
 	GetRoleUsersFunc           func(ctx context.Context, roleID string) ([]*client.Account, error)
 	GetRBACConfigMapFunc       func(ctx context.Context) (*corev1.ConfigMap, error)
+
+	// Account deprovisioning.
+	RevokeAccountTokensFunc     func(ctx context.Context, username string) error
+	SetAccountEnabledFunc       func(ctx context.Context, username string, enabled bool) error
+	RemoveAccountPoliciesFunc func(ctx context.Context, username string) error
+	DeleteAccountFunc           func(ctx context.Context, username string) error
+	PurgeAccountCredentialsFunc func(ctx context.Context, username string) error
+	RotateAccountPasswordFunc   func(ctx context.Context, username string, password string) error
+}
+
+// RevokeAccountTokens calls the mock method if it is defined.
+func (m *MockClient) RevokeAccountTokens(ctx context.Context, username string) error {
+	if m.RevokeAccountTokensFunc != nil {
+		return m.RevokeAccountTokensFunc(ctx, username)
+	}
+	return nil
+}
+
+// SetAccountEnabled calls the mock method if it is defined.
+func (m *MockClient) SetAccountEnabled(ctx context.Context, username string, enabled bool) error {
+	if m.SetAccountEnabledFunc != nil {
+		return m.SetAccountEnabledFunc(ctx, username, enabled)
+	}
+	return nil
+}
+
+// RemoveAccountPolicies calls the mock method if it is defined.
+func (m *MockClient) RemoveAccountPolicies(ctx context.Context, username string) error {
+	if m.RemoveAccountPoliciesFunc != nil {
+		return m.RemoveAccountPoliciesFunc(ctx, username)
+	}
+	return nil
+}
+
+// DeleteAccount calls the mock method if it is defined.
+func (m *MockClient) DeleteAccount(ctx context.Context, username string) error {
+	if m.DeleteAccountFunc != nil {
+		return m.DeleteAccountFunc(ctx, username)
+	}
+	return nil
+}
+
+// PurgeAccountCredentials calls the mock method if it is defined.
+// RotateAccountPassword calls the mock method if it is defined.
+func (m *MockClient) RotateAccountPassword(ctx context.Context, username string, password string) error {
+	if m.RotateAccountPasswordFunc != nil {
+		return m.RotateAccountPasswordFunc(ctx, username, password)
+	}
+	return nil
+}
+
+func (m *MockClient) PurgeAccountCredentials(ctx context.Context, username string) error {
+	if m.PurgeAccountCredentialsFunc != nil {
+		return m.PurgeAccountCredentialsFunc(ctx, username)
+	}
+	return nil
 }
 
 // GetAccounts calls the mock method if it is defined.

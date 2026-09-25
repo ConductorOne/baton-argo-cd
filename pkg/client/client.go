@@ -529,13 +529,36 @@ func (c *Client) GetRoles(ctx context.Context) ([]*Role, annotations.Annotations
 
 func (c *Client) CreateAccount(ctx context.Context, username string, password string) (*Account, annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
-	cmPatch := fmt.Sprintf(`[{"op": "add", "path": "/data/accounts.%s", "value": "%s"}]`, username, defaultAccountCapabilities)
-	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.JSONPatchType, []byte(cmPatch), metav1.PatchOptions{}); err != nil {
+
+	if err := validateAccountName(username); err != nil {
+		return nil, nil, err
+	}
+
+	accountKey := accountKeyPrefix + username
+
+	// A JSON merge patch does all three things this needs in one non-destructive request, with
+	// no read-modify-write to race against: it creates the `data` container when argocd-cm has
+	// none (the state of Argo CD's upstream install manifests, and so of any cluster with no
+	// local accounts yet), adds the account, and clears any `accounts.<name>.enabled` flag left
+	// by a previous `disable_user` action -- a null member removes the key, and is a no-op when
+	// it is already absent. Argo CD treats an account as enabled only when that key is missing,
+	// so a stale flag would otherwise yield an account that cannot authenticate even though
+	// provisioning reported success.
+	cmPatch, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			accountKey:                        defaultAccountCapabilities,
+			accountKey + accountEnabledSuffix: nil,
+		},
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("argocd-connector: failed to marshal ConfigMap patch: %w", err)
+	}
+
+	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, argoCDConfigMapName, types.MergePatchType, cmPatch, metav1.PatchOptions{}); err != nil {
 		return nil, nil, fmt.Errorf("argocd-connector: failed to update ConfigMap: %w", err)
 	}
 	l.Debug("ConfigMap updated successfully")
-	err := c.UpdateUserPassword(ctx, username, password)
-	if err != nil {
+	if err := c.UpdateUserPassword(ctx, username, password); err != nil {
 		return nil, nil, fmt.Errorf("argocd-connector: failed to update user password: %w", err)
 	}
 	account := &Account{
@@ -706,12 +729,25 @@ func (c *Client) UpdateUserPassword(ctx context.Context, username string, passwo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("argocd-connector: failed to update user password with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return httpStatusError(resp, "argocd-connector: failed to update user password")
 	}
 
 	// Success response is empty body with 200 status
 	return nil
+}
+
+// parsePolicyCSV parses the `policy.csv` value of `argocd-rbac-cm` into its records.
+func parsePolicyCSV(policyCsv string) ([][]string, error) {
+	reader := csv.NewReader(strings.NewReader(policyCsv))
+	reader.Comment = '#'
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("argocd-connector: failed to parse policy csv: %w", err)
+	}
+	return records, nil
 }
 
 // RemoveUserRole removes a role grant from a user in the `argocd-rbac-cm` ConfigMap.
@@ -729,14 +765,9 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
 
-	reader := csv.NewReader(strings.NewReader(policyCsv))
-	reader.Comment = '#'
-	reader.TrimLeadingSpace = true
-	reader.FieldsPerRecord = -1
-
-	records, err := reader.ReadAll()
+	records, err := parsePolicyCSV(policyCsv)
 	if err != nil {
-		return nil, fmt.Errorf("argocd-connector: failed to parse policy csv: %w", err)
+		return nil, err
 	}
 
 	var newRecords [][]string

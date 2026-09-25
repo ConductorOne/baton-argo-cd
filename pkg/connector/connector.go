@@ -34,7 +34,8 @@ func (d *Connector) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.R
 func (d *Connector) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
 		DisplayName: "Argo CD",
-		Description: "Connector syncs data about accounts, roles, create account and role resources in Argo CD.",
+		Description: "Connector syncs data about accounts and roles, creates, deletes, enables and disables " +
+			"local accounts, and manages role assignments in Argo CD.",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
 				"username": {

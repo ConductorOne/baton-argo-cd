@@ -2,16 +2,33 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/conductorone/baton-argo-cd/pkg/client"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// userBuilder implements the ResourceSyncer and AccountManager interfaces for Argo CD users.
+// Compile-time assertions that userBuilder still satisfies the SDK interfaces it is registered
+// for. The SDK discovers capabilities by type assertion, so a drifting method signature would
+// otherwise silently drop account creation, deletion or credential rotation from the connector.
+var (
+	_ connectorbuilder.ResourceSyncer    = (*userBuilder)(nil)
+	_ connectorbuilder.AccountManager    = (*userBuilder)(nil)
+	_ connectorbuilder.ResourceDeleter   = (*userBuilder)(nil)
+	_ connectorbuilder.CredentialManager = (*userBuilder)(nil)
+)
+
+// userBuilder implements the ResourceSyncer, AccountManager, ResourceDeleter and CredentialManager
+// interfaces for Argo CD users.
 type userBuilder struct {
 	resourceType *v2.ResourceType
 	client       ArgoCdClient
@@ -99,6 +116,109 @@ func (u *userBuilder) CreateAccount(
 	return &v2.CreateAccountResponse_SuccessResult{
 		Resource: userResource,
 	}, []*v2.PlaintextData{passwordResult}, annos, nil
+}
+
+// Delete permanently removes an Argo CD local account. Reversible deactivation is the
+// disable_user action instead (see actions.go).
+//
+// Argo CD's Account REST API has no delete endpoint, so the account entry is removed through the
+// Kubernetes API. Deletion runs in three steps, in this order:
+//
+//  1. Revoke the account's issued API tokens through the Argo CD API. This is the only immediate
+//     revocation path, and it needs the account to still be resolvable through the API.
+//  2. Remove the account's role grants and direct permissions from `policy.csv` in `argocd-rbac-cm`.
+//  3. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
+//  4. Purge the account's stored credentials (password hash and token records) from `argocd-secret`.
+//
+// Steps 2 and 4 keep a later account created with the same name from inheriting the old
+// account's roles, permissions and credentials.
+//
+// Each step treats an already-deleted state as success, so a retried delete converges instead of
+// failing.
+func (u *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
+
+	if rt := resourceId.GetResourceType(); rt != userResourceType.Id {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"baton-argo-cd: cannot delete resource type %q: only %q resources can be deleted",
+			rt, userResourceType.Id,
+		)
+	}
+
+	username := strings.TrimSpace(resourceId.GetResource())
+	if username == "" {
+		return nil, status.Error(codes.InvalidArgument, "baton-argo-cd: cannot delete account: resource id is empty")
+	}
+
+	// An account Argo CD no longer knows has no tokens left to revoke.
+	if err := u.client.RevokeAccountTokens(ctx, username); err != nil && !errors.Is(err, client.ErrAccountNotFound) {
+		return nil, fmt.Errorf("baton-argo-cd: failed to revoke API tokens for account %q: %w", username, err)
+	}
+
+	if err := u.client.RemoveAccountPolicies(ctx, username); err != nil {
+		return nil, fmt.Errorf("baton-argo-cd: failed to remove RBAC policies for account %q: %w", username, err)
+	}
+
+	if err := u.client.DeleteAccount(ctx, username); err != nil {
+		return nil, fmt.Errorf("baton-argo-cd: failed to delete account %q: %w", username, err)
+	}
+
+	if err := u.client.PurgeAccountCredentials(ctx, username); err != nil {
+		return nil, fmt.Errorf("baton-argo-cd: failed to purge stored credentials for account %q: %w", username, err)
+	}
+
+	l.Info("Deleted Argo CD local account", zap.String("account", username))
+
+	return nil, nil
+}
+
+// RotateCapabilityDetails reports the credential options supported for password rotation.
+func (u *userBuilder) RotateCapabilityDetails(ctx context.Context) (*v2.CredentialDetailsCredentialRotation, annotations.Annotations, error) {
+	return &v2.CredentialDetailsCredentialRotation{
+		SupportedCredentialOptions: []v2.CapabilityDetailCredentialOption{
+			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
+		},
+		PreferredCredentialOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
+	}, nil, nil
+}
+
+// Rotate sets a new random password for an Argo CD local account and returns it so C1 can store
+// it in a vault. Argo CD rejects every session and API token issued before a password change, so
+// rotation also cuts off the account's existing access.
+func (u *userBuilder) Rotate(
+	ctx context.Context,
+	resourceId *v2.ResourceId,
+	credentialOptions *v2.LocalCredentialOptions,
+) ([]*v2.PlaintextData, annotations.Annotations, error) {
+	if rt := resourceId.GetResourceType(); rt != userResourceType.Id {
+		return nil, nil, status.Errorf(codes.InvalidArgument,
+			"baton-argo-cd: cannot rotate credentials of resource type %q: only %q resources are supported",
+			rt, userResourceType.Id,
+		)
+	}
+
+	username := strings.TrimSpace(resourceId.GetResource())
+	if username == "" {
+		return nil, nil, status.Error(codes.InvalidArgument, "baton-argo-cd: cannot rotate credentials: resource id is empty")
+	}
+
+	password, err := generateCredentials(credentialOptions)
+	if err != nil {
+		return nil, nil, status.Errorf(codes.InvalidArgument, "baton-argo-cd: failed to generate password: %v", err)
+	}
+
+	if err := u.client.RotateAccountPassword(ctx, username, password); err != nil {
+		return nil, nil, fmt.Errorf("baton-argo-cd: failed to rotate password for account %q: %w", username, err)
+	}
+
+	ctxzap.Extract(ctx).Info("Rotated Argo CD local account password", zap.String("account", username))
+
+	return []*v2.PlaintextData{
+		{
+			Name:  "password",
+			Bytes: []byte(password),
+		},
+	}, nil, nil
 }
 
 // extractUsername safely retrieves the username from the AccountInfo protobuf message.
