@@ -13,7 +13,7 @@ sidebarTitle: "ArgoCD"
 | Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | — |
 
-The ArgoCD connector supports [automatic account provisioning](/product/admin/account-provisioning).
+The ArgoCD connector supports [automatic account provisioning and deprovisioning](/product/admin/account-provisioning).
 
 When a new account is created by C1, the account's password will be sent to a [vault](/product/admin/vaults).
 
@@ -21,7 +21,7 @@ The connector also supports credential rotation for local accounts: C1 sets a ne
 and sends it to a vault. ArgoCD rejects every session and API token issued before a password
 change, so rotation also cuts off the account's existing access.
 
-### Connector actions
+## Connector actions
 
 Connector actions are custom capabilities that extend C1 automations with app-specific operations.
 
@@ -32,15 +32,15 @@ Connector actions are custom capabilities that extend C1 automations with app-sp
 
 | Action name | Additional fields | Description |
 | :--- | :--- | :--- |
-| `disable_user` | `user_id` (string, required) | Disables an ArgoCD local account by setting `accounts.<name>.enabled: "false"` in `argocd-cm`. ArgoCD rejects the account's password and API tokens while it is disabled. Reversible with `enable_user`. |
+| `disable_user` | `user_id` (string, required) | Disables an ArgoCD local account. ArgoCD rejects the account's password and API tokens while it is disabled. Reversible with `enable_user`. |
 | `enable_user` | `user_id` (string, required) | Re-enables a disabled ArgoCD local account, restoring its existing password and API tokens. |
 | `revoke_tokens` | `user_id` (string, required) | Revokes every API token issued to an ArgoCD local account. The account, its password and its enabled state are unchanged. Run it with `disable_user` when a re-enabled account must not get its old tokens back. |
 
-### Account lifecycle
+## Account lifecycle
 
-The connector manages ArgoCD **local accounts** (the `accounts.*` entries in the `argocd-cm`
-ConfigMap). ArgoCD's Account API exposes no delete, disable or enable endpoint, so the account
-entry is changed through the Kubernetes API.
+The connector manages ArgoCD **local accounts**. ArgoCD's Account API exposes no delete, disable
+or enable endpoint, so the connector changes accounts through the Kubernetes API, using the
+permissions described in [Gather ArgoCD credentials](#gather-argocd-credentials).
 
 - **Disable / enable** (the `disable_user` and `enable_user` actions) are reversible. The account
   keeps its password and API tokens, which ArgoCD refuses while the account is disabled and
@@ -49,39 +49,28 @@ entry is changed through the Kubernetes API.
   touching the account itself.
 - **Rotate password** (credential rotation) sets a new random password and invalidates every
   session and API token issued before it.
-- **Delete** (account deprovisioning) is permanent. It performs four steps:
-  1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
-  2. Removes the account's role grants and direct permissions (every `g` and `p` line whose subject
-     is the account) from `policy.csv` in `argocd-rbac-cm`, so an account created later with the
-     same name inherits neither. Rewriting `policy.csv` normalizes its formatting and drops its `#`
-     comment lines.
-  3. Removes the `accounts.<name>` entry from `argocd-cm`.
-  4. Purges the account's stored credentials - its password hash, password mtime marker, and token
-     records - from the `argocd-secret` Secret, so they are not reused if the account name is
-     created again.
+- **Delete** (account deprovisioning) is permanent. It revokes the account's API tokens, removes
+  its role grants and direct permissions, removes the account, and purges its stored credentials,
+  so an account created later with the same name inherits none of them.
 
 Use `disable_user` to suspend access you may need to restore, and delete to remove the account
 for good.
 
-Notes and limitations:
+**Notes:**
 
 - The built-in `admin` account cannot be disabled, enabled, rotated, stripped of its tokens or
-  deleted. It is controlled by the top-level `admin.*` keys, not by `accounts.*`.
-- The connector refuses to disable, delete, rotate the password of, or revoke the tokens of the
-  account it authenticates as, since it would lock itself out of ArgoCD. Enabling it is allowed.
-- SSO/Dex-managed identities are not local accounts, so there is nothing for the connector to
-  manage in ArgoCD itself.
+  deleted. The connector also refuses to do any of these, except enable, to the account it
+  authenticates as, since it would lock itself out of ArgoCD. SSO/Dex-managed identities are not
+  local accounts, so there is nothing for the connector to manage for them.
 - Disabling a disabled account, enabling an enabled account, revoking the tokens of an account
   that has none, or deleting an account that is already gone is reported as success. The actions
   and rotation fail with a not-found error for an account ArgoCD does not know.
+- Account names may contain only alphanumerics, `-` and `_`. Names containing `.` are rejected,
+  since ArgoCD cannot address them as accounts.
+- Deleting an account rewrites `policy.csv` in `argocd-rbac-cm`, which removes its `#` comment lines.
 - Revoking tokens and rotating another account's password need the `accounts, update` ArgoCD RBAC
-  permission for the connector's account.
-- Account names may contain only alphanumerics, `-` and `_`. ArgoCD splits `accounts.*` keys in
-  `argocd-cm` on `.`, so a dotted name is not addressable as an account — `accounts.john.smith`
-  is parsed as a `smith` property of an account named `john`. The connector rejects such names
-  rather than writing a key ArgoCD would silently ignore.
-- Deleting accounts requires the `secrets` Kubernetes permissions described below, in addition to
-  the `configmaps` permissions used for sync, provisioning and the enable/disable actions.
+  permission for the connector's account. Deleting accounts also requires the `secrets` Kubernetes
+  permissions described below.
 
 ## Gather ArgoCD credentials
 

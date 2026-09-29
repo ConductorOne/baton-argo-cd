@@ -31,6 +31,29 @@ While developing the connector, please fill out this form. This information is n
    > The connector also refuses to disable, delete, rotate or revoke the tokens of the account it
    > authenticates as, since it would lock itself out.
 
+## Account lifecycle implementation details
+
+ArgoCD's Account API has no delete, disable or enable endpoint, so these operations edit the
+ArgoCD ConfigMaps and Secret directly through the Kubernetes API.
+
+- Local accounts are the `accounts.<name>` entries in the `argocd-cm` ConfigMap. `disable_user`
+  sets `accounts.<name>.enabled: "false"`; `enable_user` removes the flag.
+- The built-in `admin` account is controlled by the top-level `admin.*` keys (for example
+  `admin.enabled`), not by `accounts.*`, so the connector never manages it.
+- ArgoCD splits `accounts.*` keys in `argocd-cm` on `.`, so a dotted name is not addressable as an
+  account: `accounts.john.smith` is parsed as a `smith` property of an account named `john`. The
+  connector rejects such names rather than writing a key ArgoCD would silently ignore.
+- Deleting an account performs four steps, in order:
+  1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
+  2. Removes every `g` and `p` line whose subject is the account from `policy.csv` in
+     `argocd-rbac-cm`. Rewriting `policy.csv` normalizes its formatting and drops its `#` comment
+     lines.
+  3. Removes the `accounts.<name>` entry from `argocd-cm`.
+  4. Purges the account's stored credentials from the `argocd-secret` Secret: the
+     `accounts.<name>.password`, `accounts.<name>.passwordMtime` and `accounts.<name>.tokens` keys.
+     If the `argocd-secret` permissions are missing, this step fails with a `403` after the account
+     has already been removed from `argocd-cm`.
+
 ## Connector credentials
 
 1. What credentials or information are needed to set up the connector? (For example, API key, client ID and secret, domain, etc.)
