@@ -69,6 +69,12 @@ func httpStatusError(resp *http.Response, message string) error {
 func kubernetesError(err error, message string) error {
 	wrapped := fmt.Errorf("%s: %w", message, err)
 
+	// A 409 from the API server is an optimistic-concurrency conflict (stale resourceVersion), not a
+	// duplicate resource, so report it as retryable rather than the AlreadyExists the HTTP mapping gives.
+	if apierrors.IsConflict(err) {
+		return withCode(codes.Aborted, wrapped)
+	}
+
 	var apiStatus apierrors.APIStatus
 	if errors.As(err, &apiStatus) {
 		return withCode(uhttp.GrpcCodeFromHTTPStatus(int(apiStatus.Status().Code)), wrapped)

@@ -32,7 +32,7 @@ type MockClient struct {
 	// Account deprovisioning.
 	RevokeAccountTokensFunc     func(ctx context.Context, username string) error
 	SetAccountEnabledFunc       func(ctx context.Context, username string, enabled bool) error
-	RemoveAccountPoliciesFunc func(ctx context.Context, username string) error
+	RemoveAccountPoliciesFunc   func(ctx context.Context, username string) error
 	DeleteAccountFunc           func(ctx context.Context, username string) error
 	PurgeAccountCredentialsFunc func(ctx context.Context, username string) error
 	RotateAccountPasswordFunc   func(ctx context.Context, username string, password string) error

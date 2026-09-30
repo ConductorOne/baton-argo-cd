@@ -13,6 +13,7 @@ import (
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -354,6 +355,11 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 
 	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// A missing ConfigMap means no policies, which keeps delete idempotent.
+			l.Debug("RBAC ConfigMap not found, no account policies to remove", zap.String("account", username))
+			return nil
+		}
 		return kubernetesError(err, "argocd-connector: failed to get rbac configmap")
 	}
 
@@ -386,7 +392,7 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 		return nil
 	}
 
-	if err := c.updateRBACPolicy(ctx, kept, true); err != nil {
+	if err := c.updateRBACPolicy(ctx, cm, kept); err != nil {
 		return kubernetesError(err, fmt.Sprintf("argocd-connector: failed to remove RBAC policies of account %q", username))
 	}
 

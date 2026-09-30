@@ -23,6 +23,7 @@ import (
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -453,6 +454,14 @@ func (c *Client) GetRBACConfigMap(ctx context.Context) (*corev1.ConfigMap, error
 
 	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, rbacConfigMapName, metav1.GetOptions{})
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// Callers decide whether a missing ConfigMap is an error.
+			l.Debug("ConfigMap not found",
+				zap.String("name", rbacConfigMapName),
+				zap.String("namespace", argocdNamespace),
+			)
+			return nil, fmt.Errorf("argocd-connector: failed to fetch ConfigMap '%s' in namespace '%s': %w", rbacConfigMapName, argocdNamespace, err)
+		}
 		l.Error("failed to fetch ConfigMap",
 			zap.String("name", rbacConfigMapName),
 			zap.String("namespace", argocdNamespace),
@@ -653,36 +662,32 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 	l.Debug("adding role to policy", zap.String("role", prefixedRoleID))
 	records = append(records, []string{policyTypeGrant, userID, prefixedRoleID})
 
-	if err := c.updateRBACPolicy(ctx, records, ok); err != nil {
+	if err := c.updateRBACPolicy(ctx, cm, records); err != nil {
 		return nil, fmt.Errorf("argocd-connector: failed to update rbac policy: %w", err)
 	}
 
 	return nil, nil
 }
 
-func (c *Client) updateRBACPolicy(ctx context.Context, records [][]string, policyExists bool) error {
+// updateRBACPolicy writes records back as policy.csv on a copy of cm, the ConfigMap the caller read
+// them from. The update carries cm's resourceVersion, so the API server rejects it with 409
+// Conflict if another grant or revoke changed the ConfigMap in between, instead of silently
+// overwriting that change.
+func (c *Client) updateRBACPolicy(ctx context.Context, cm *corev1.ConfigMap, records [][]string) error {
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
 	if err := writer.WriteAll(records); err != nil {
 		return fmt.Errorf("argocd-connector: failed to write policy csv: %w", err)
 	}
 
-	updatedPolicyCsv := buf.String()
-
-	marshaledCsv, err := json.Marshal(updatedPolicyCsv)
-	if err != nil {
-		return fmt.Errorf("argocd-connector: failed to marshal policy csv for patch: %w", err)
+	updated := cm.DeepCopy()
+	if updated.Data == nil {
+		updated.Data = map[string]string{}
 	}
+	updated.Data[policyCSVKey] = buf.String()
 
-	var patch string
-	if policyExists {
-		patch = fmt.Sprintf(`[{"op": "replace", "path": "/data/%s", "value": %s}]`, policyCSVKey, string(marshaledCsv))
-	} else {
-		patch = fmt.Sprintf(`[{"op": "add", "path": "/data/%s", "value": %s}]`, policyCSVKey, string(marshaledCsv))
-	}
-
-	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Patch(ctx, rbacConfigMapName, types.JSONPatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
-		return fmt.Errorf("argocd-connector: failed to patch rbac configmap: %w", err)
+	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("argocd-connector: failed to update rbac configmap: %w", err)
 	}
 
 	return nil
@@ -793,7 +798,7 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		l.Debug("role already revoked", zap.String("role", prefixedRoleID))
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
-	if err := c.updateRBACPolicy(ctx, newRecords, ok); err != nil {
+	if err := c.updateRBACPolicy(ctx, cm, newRecords); err != nil {
 		return nil, fmt.Errorf("argocd-connector: failed to update rbac policy: %w", err)
 	}
 

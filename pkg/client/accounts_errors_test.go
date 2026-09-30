@@ -155,7 +155,7 @@ func TestKubernetesErrors_Codes(t *testing.T) {
 			name: "delete, configmap patch conflict", verb: "patch", resource: "configmaps",
 			err:       apierrors.NewConflict(configMaps, argoCDConfigMapName, nil),
 			operation: func(c *Client) error { return c.DeleteAccount(context.Background(), "alice") },
-			want:      codes.AlreadyExists,
+			want:      codes.Aborted,
 		},
 		{
 			name: "purge, secret get forbidden", verb: "get", resource: "secrets",
@@ -176,10 +176,18 @@ func TestKubernetesErrors_Codes(t *testing.T) {
 			want:      codes.PermissionDenied,
 		},
 		{
-			name: "rbac policies, rbac configmap patch unavailable", verb: "patch", resource: "configmaps",
+			name: "rbac policies, rbac configmap update unavailable", verb: "update", resource: "configmaps",
 			err:       apierrors.NewServiceUnavailable("api server down"),
 			operation: func(c *Client) error { return c.RemoveAccountPolicies(context.Background(), "alice") },
 			want:      codes.Unavailable,
+		},
+		{
+			// The update carries the resourceVersion read earlier, so a concurrent change to the
+			// ConfigMap surfaces as a conflict rather than being overwritten.
+			name: "rbac policies, rbac configmap update conflict", verb: "update", resource: "configmaps",
+			err:       apierrors.NewConflict(configMaps, rbacConfigMapName, nil),
+			operation: func(c *Client) error { return c.RemoveAccountPolicies(context.Background(), "alice") },
+			want:      codes.Aborted,
 		},
 	}
 
@@ -305,4 +313,14 @@ func TestCodedErrors_MessageNotRepeated(t *testing.T) {
 	assert.Equal(t, codes.NotFound, st.Code())
 	assert.Equal(t, 1, strings.Count(st.Message(), "ghost is not defined"))
 	require.ErrorIs(t, wrapped, ErrAccountNotFound)
+}
+
+// TestRemoveAccountPolicies_MissingRBACConfigMap verifies a missing argocd-rbac-cm means there are
+// no policies to remove, so deleting an account stays idempotent.
+func TestRemoveAccountPolicies_MissingRBACConfigMap(t *testing.T) {
+	k8sClient := fake.NewSimpleClientset()
+	cli := newTestClient(k8sClient, "https://test.com", nil)
+
+	require.NoError(t, cli.RemoveAccountPolicies(context.Background(), "alice"))
+	assert.Zero(t, patchCount(k8sClient))
 }
