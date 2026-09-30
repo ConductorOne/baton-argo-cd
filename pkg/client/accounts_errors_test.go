@@ -189,6 +189,24 @@ func TestKubernetesErrors_Codes(t *testing.T) {
 			operation: func(c *Client) error { return c.RemoveAccountPolicies(context.Background(), "alice") },
 			want:      codes.Aborted,
 		},
+		{
+			name: "grant, rbac configmap update conflict", verb: "update", resource: "configmaps",
+			err: apierrors.NewConflict(configMaps, rbacConfigMapName, nil),
+			operation: func(c *Client) error {
+				_, err := c.UpdateUserRole(context.Background(), "alice", "readonly")
+				return err
+			},
+			want: codes.Aborted,
+		},
+		{
+			name: "revoke, rbac configmap update conflict", verb: "update", resource: "configmaps",
+			err: apierrors.NewConflict(configMaps, rbacConfigMapName, nil),
+			operation: func(c *Client) error {
+				_, err := c.RemoveUserRole(context.Background(), "alice", "dev")
+				return err
+			},
+			want: codes.Aborted,
+		},
 	}
 
 	for _, tt := range tests {
@@ -235,7 +253,7 @@ func TestManagedAccount_RefusesSelfLockout(t *testing.T) {
 		}
 	}
 
-	assert.Zero(t, patchCount(k8sClient), "a refused change must not write anything")
+	assert.Zero(t, writeCount(k8sClient), "a refused change must not write anything")
 	assert.Equal(t, policy, getRBACPolicy(t, k8sClient))
 
 	// Enabling the connector's own account restores access rather than removing it.
@@ -293,7 +311,7 @@ func TestRemoveAccountPolicies_NothingToRemove(t *testing.T) {
 
 			cli := newTestClient(k8sClient, "https://test.com", nil)
 			require.NoError(t, cli.RemoveAccountPolicies(context.Background(), "alice"))
-			assert.Zero(t, patchCount(k8sClient))
+			assert.Zero(t, writeCount(k8sClient))
 		})
 	}
 }
@@ -322,5 +340,5 @@ func TestRemoveAccountPolicies_MissingRBACConfigMap(t *testing.T) {
 	cli := newTestClient(k8sClient, "https://test.com", nil)
 
 	require.NoError(t, cli.RemoveAccountPolicies(context.Background(), "alice"))
-	assert.Zero(t, patchCount(k8sClient))
+	assert.Zero(t, writeCount(k8sClient))
 }

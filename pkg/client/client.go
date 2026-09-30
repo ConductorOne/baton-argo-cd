@@ -663,7 +663,7 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 	records = append(records, []string{policyTypeGrant, userID, prefixedRoleID})
 
 	if err := c.updateRBACPolicy(ctx, cm, records); err != nil {
-		return nil, fmt.Errorf("argocd-connector: failed to update rbac policy: %w", err)
+		return nil, kubernetesError(err, "argocd-connector: failed to update rbac policy")
 	}
 
 	return nil, nil
@@ -799,7 +799,7 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
 	if err := c.updateRBACPolicy(ctx, cm, newRecords); err != nil {
-		return nil, fmt.Errorf("argocd-connector: failed to update rbac policy: %w", err)
+		return nil, kubernetesError(err, "argocd-connector: failed to update rbac policy")
 	}
 
 	return nil, nil

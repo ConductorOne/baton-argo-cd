@@ -74,11 +74,13 @@ func TestJSONPointerEscape(t *testing.T) {
 	assert.Equal(t, "/data/accounts.alice.enabled", dataKeyPath("accounts.alice.enabled"))
 }
 
-// patchCount returns how many patch requests the fake clientset recorded.
-func patchCount(k8sClient *fake.Clientset) int {
+// writeCount returns how many write requests (patch, update, create or delete) the fake
+// clientset recorded.
+func writeCount(k8sClient *fake.Clientset) int {
 	var n int
 	for _, action := range k8sClient.Actions() {
-		if action.GetVerb() == "patch" {
+		switch action.GetVerb() {
+		case "patch", "update", "create", "delete":
 			n++
 		}
 	}
@@ -191,7 +193,7 @@ func TestSetAccountEnabled_AlreadyInState(t *testing.T) {
 			require.NoError(t, cli.SetAccountEnabled(ctx, "alice", tt.enabled))
 
 			assert.Equal(t, tt.data, getConfigMapData(t, k8sClient))
-			assert.Zero(t, patchCount(k8sClient), "an account already in the requested state should not be patched")
+			assert.Zero(t, writeCount(k8sClient), "an account already in the requested state should not be patched")
 		})
 	}
 }
@@ -212,7 +214,7 @@ func TestSetAccountEnabled_AccountNotDefined(t *testing.T) {
 				cli := newTestClient(k8sClient, "https://test.com", nil)
 				err := cli.SetAccountEnabled(ctx, "alice", enabled)
 				require.ErrorIs(t, err, ErrAccountNotFound)
-				assert.Zero(t, patchCount(k8sClient))
+				assert.Zero(t, writeCount(k8sClient))
 			})
 		}
 	}
