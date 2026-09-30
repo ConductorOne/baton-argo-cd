@@ -167,7 +167,7 @@ func (u *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (an
 		return nil, fmt.Errorf("baton-argo-cd: failed to purge stored credentials for account %q: %w", username, err)
 	}
 
-	l.Info("Deleted Argo CD local account", zap.String("account", username))
+	l.Debug("Deleted Argo CD local account", zap.String("account", username))
 
 	return nil, nil
 }
