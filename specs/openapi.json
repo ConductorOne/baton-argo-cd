@@ -1,0 +1,365 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Argo CD API (baton-argo-cd connector surface)",
+    "description": "Subset of the Argo CD REST API that the baton-argo-cd connector's pkg/client package calls. Scope is limited to the connector's request sites, not the full Argo CD API. Response schemas include only the fields the connector's Go structs (pkg/client/models.go, client.go, accounts.go) declare via json tags; shapes and nullability are settled against Argo CD's published swagger. The connector also calls the Kubernetes API directly (ConfigMaps argocd-cm/argocd-rbac-cm, Secret argocd-secret) via client-go; those operations are Kubernetes API calls, not Argo CD REST calls, and are intentionally not represented here.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "{apiUrl}",
+      "description": "Admin-configured Argo CD server base URL (connector's --api-url flag / apiUrl config field).",
+      "variables": {
+        "apiUrl": {
+          "default": "https://argocd.example.com"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/session": {
+      "post": {
+        "operationId": "createSession",
+        "summary": "Log in and obtain a JWT session token",
+        "description": "Called by Client.ensureAuthenticated before any other request. Exempted from the bearer-auth requirement below (authRoundTripper skips auth for this path) since it is how the token is obtained in the first place.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account": {
+      "get": {
+        "operationId": "listAccounts",
+        "summary": "List Argo CD local accounts",
+        "description": "Client.GetAccounts.",
+        "responses": {
+          "200": {
+            "description": "List of accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/{name}": {
+      "get": {
+        "operationId": "getAccount",
+        "summary": "Get a single Argo CD local account",
+        "description": "Client.GetAccount. A 404 response is treated by the connector as ErrAccountNotFound.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Argo CD local account name (Go argument: username)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/{name}/token/{id}": {
+      "delete": {
+        "operationId": "deleteAccountToken",
+        "summary": "Revoke a single API token issued to an account",
+        "description": "Client.revokeAccountToken (called from RevokeAccountTokens). A 404 response is treated by the connector as already-revoked (not an error).",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Argo CD local account name (Go argument: username)."
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Token ID (Go argument: tokenID, sourced from Account.Tokens[].ID)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Token already revoked / not found; treated by the connector as success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/password": {
+      "put": {
+        "operationId": "updateAccountPassword",
+        "summary": "Update a local account's password",
+        "description": "Client.UpdateUserPassword, called both directly (account creation flow) and via Client.RotateAccountPassword. The request authenticates the change with the connector's own current admin password as currentPassword.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password updated. Success response is an empty body with 200 status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Client.setAuthHeader sends 'Authorization: Bearer <session token>' on every request except /api/v1/session, using the token obtained from POST /api/v1/session (see authRoundTripper.RoundTrip in client.go)."
+      }
+    },
+    "schemas": {
+      "SessionCreateRequest": {
+        "type": "object",
+        "description": "Fields the connector sends (client.go loginData). Argo CD's SessionCreateRequest additionally accepts a 'token' field for token-based login; the connector never uses it and it is omitted here (spec scope is connector scope).",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "description": "Client.ensureAuthenticated decodes this into an anonymous struct with only 'token'.",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "JWT session token. The connector treats an empty/absent token as an authentication failure."
+          }
+        }
+      },
+      "AccountsList": {
+        "type": "object",
+        "description": "Client.GetAccounts decodes this into an anonymous struct with only 'items'.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Account"
+            }
+          }
+        }
+      },
+      "Account": {
+        "type": "object",
+        "description": "pkg/client/models.go Account struct.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Argo CD account capabilities, e.g. 'login', 'apiKey'."
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountToken"
+            },
+            "nullable": true,
+            "description": "Omitted by the Go struct's 'omitempty' when empty; the connector's RevokeAccountTokens loop tolerates a nil slice."
+          }
+        }
+      },
+      "AccountToken": {
+        "type": "object",
+        "description": "pkg/client/models.go AccountToken struct. Argo CD's accountToken definition also has an 'expiresAt' integer field, which the connector's struct does not declare and therefore does not read; omitted here per spec scope.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "issuedAt": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "UpdatePasswordRequest": {
+        "type": "object",
+        "description": "pkg/client/client.go UpdateUserPasswordRequest struct.",
+        "properties": {
+          "currentPassword": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "newPassword": {
+            "type": "string"
+          }
+        }
+      },
+      "EmptyResponse": {
+        "type": "object",
+        "description": "The connector does not decode a body for this response (UpdateUserPassword and revokeAccountToken only check the HTTP status). Argo CD's swagger declares an empty object for both (accountEmptyResponse / accountUpdatePasswordResponse).",
+        "properties": {}
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "The connector does not deserialize error bodies into a struct; httpStatusError reads the raw response body as text and embeds it in the wrapped error message. Argo CD's swagger describes error responses with this shape (runtimeError); included for documentation purposes only, not because the connector parses it.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

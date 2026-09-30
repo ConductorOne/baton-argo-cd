@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/conductorone/baton-argo-cd/pkg/client"
@@ -10,8 +11,11 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -203,4 +207,263 @@ func TestUserBuilder_ExtractUsername(t *testing.T) {
 func createProfile(data map[string]interface{}) *structpb.Struct {
 	profile, _ := structpb.NewStruct(data)
 	return profile
+}
+
+// TestUserBuilder_Delete verifies the hard-delete sequence: tokens are revoked through the API,
+// RBAC policies are removed from argocd-rbac-cm, the account entry is removed from argocd-cm, and
+// stored credentials are purged -- in that order.
+func TestUserBuilder_Delete(t *testing.T) {
+	var calls []string
+	mockCli := &test.MockClient{
+		RevokeAccountTokensFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "revoke-tokens")
+			return nil
+		},
+		SetAccountEnabledFunc: func(ctx context.Context, username string, enabled bool) error {
+			calls = append(calls, "set-enabled")
+			return nil
+		},
+		RemoveAccountPoliciesFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "remove-policies")
+			return nil
+		},
+		DeleteAccountFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "delete")
+			return nil
+		},
+		PurgeAccountCredentialsFunc: func(ctx context.Context, username string) error {
+			assert.Equal(t, "alice", username)
+			calls = append(calls, "purge-credentials")
+			return nil
+		},
+	}
+
+	builder := newUserBuilder(mockCli)
+	annos, err := builder.Delete(context.Background(), &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     " alice ",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, annos)
+	assert.Equal(t, []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}, calls)
+}
+
+// TestUserBuilder_Delete_Validation verifies malformed targets are rejected before any client call.
+func TestUserBuilder_Delete_Validation(t *testing.T) {
+	failOnCall := func(ctx context.Context, username string) error {
+		t.Fatalf("unexpected client call for %q", username)
+		return nil
+	}
+	mockCli := &test.MockClient{
+		RevokeAccountTokensFunc:     failOnCall,
+		RemoveAccountPoliciesFunc:   failOnCall,
+		DeleteAccountFunc:           failOnCall,
+		PurgeAccountCredentialsFunc: failOnCall,
+	}
+	builder := newUserBuilder(mockCli)
+
+	t.Run("wrong resource type", func(t *testing.T) {
+		_, err := builder.Delete(context.Background(), &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "alice"})
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "cannot delete resource type")
+	})
+
+	t.Run("empty resource id", func(t *testing.T) {
+		_, err := builder.Delete(context.Background(), &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "  "})
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "resource id is empty")
+	})
+}
+
+// TestUserBuilder_Delete_PropagatesErrors verifies a failing step aborts the delete with a wrapped
+// error and skips the later steps.
+func TestUserBuilder_Delete_PropagatesErrors(t *testing.T) {
+	boom := errors.New("boom")
+
+	tests := []struct {
+		name      string
+		failStep  string
+		wantMsg   string
+		wantCalls []string
+	}{
+		{"token revocation fails", "revoke-tokens", "failed to revoke API tokens", []string{"revoke-tokens"}},
+		{"policy removal fails", "remove-policies", "failed to remove RBAC policies", []string{"revoke-tokens", "remove-policies"}},
+		{"delete fails", "delete", "failed to delete account", []string{"revoke-tokens", "remove-policies", "delete"}},
+		{"credential purge fails", "purge-credentials", "failed to purge stored credentials", []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []string
+			step := func(name string) func(context.Context, string) error {
+				return func(ctx context.Context, username string) error {
+					calls = append(calls, name)
+					if name == tt.failStep {
+						return boom
+					}
+					return nil
+				}
+			}
+			mockCli := &test.MockClient{
+				RevokeAccountTokensFunc:     step("revoke-tokens"),
+				RemoveAccountPoliciesFunc:   step("remove-policies"),
+				DeleteAccountFunc:           step("delete"),
+				PurgeAccountCredentialsFunc: step("purge-credentials"),
+			}
+
+			_, err := newUserBuilder(mockCli).Delete(context.Background(), &v2.ResourceId{
+				ResourceType: userResourceType.Id,
+				Resource:     "alice",
+			})
+			require.ErrorIs(t, err, boom)
+			assert.Contains(t, err.Error(), tt.wantMsg)
+			assert.Equal(t, tt.wantCalls, calls)
+		})
+	}
+}
+
+// TestUserBuilder_Delete_AccountUnknownToAPI verifies an account Argo CD no longer resolves does
+// not block the rest of the delete, so stale RBAC policies, argocd-cm and argocd-secret entries
+// still get cleaned.
+func TestUserBuilder_Delete_AccountUnknownToAPI(t *testing.T) {
+	var calls []string
+	mockCli := &test.MockClient{
+		RevokeAccountTokensFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "revoke-tokens")
+			return uhttp.WrapErrors(codes.NotFound, "not found", fmt.Errorf("%w: %s", client.ErrAccountNotFound, username))
+		},
+		RemoveAccountPoliciesFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "remove-policies")
+			return nil
+		},
+		DeleteAccountFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "delete")
+			return nil
+		},
+		PurgeAccountCredentialsFunc: func(ctx context.Context, username string) error {
+			calls = append(calls, "purge-credentials")
+			return nil
+		},
+	}
+
+	_, err := newUserBuilder(mockCli).Delete(context.Background(), &v2.ResourceId{
+		ResourceType: userResourceType.Id,
+		Resource:     "alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}, calls)
+}
+
+func randomPasswordOptions(length int64) *v2.LocalCredentialOptions {
+	return &v2.LocalCredentialOptions{
+		Options: &v2.LocalCredentialOptions_RandomPassword_{
+			RandomPassword: &v2.LocalCredentialOptions_RandomPassword{Length: length},
+		},
+	}
+}
+
+// TestUserBuilder_Rotate verifies a random password is generated, set on the trimmed account name,
+// and returned for the vault.
+func TestUserBuilder_Rotate(t *testing.T) {
+	var gotUser, gotPassword string
+	mockCli := &test.MockClient{
+		RotateAccountPasswordFunc: func(ctx context.Context, username string, password string) error {
+			gotUser, gotPassword = username, password
+			return nil
+		},
+	}
+
+	plaintexts, annos, err := newUserBuilder(mockCli).Rotate(context.Background(),
+		&v2.ResourceId{ResourceType: userResourceType.Id, Resource: " alice "},
+		randomPasswordOptions(20),
+	)
+	require.NoError(t, err)
+	assert.Nil(t, annos)
+	assert.Equal(t, "alice", gotUser)
+	require.Len(t, plaintexts, 1)
+	assert.Equal(t, "password", plaintexts[0].GetName())
+	assert.Equal(t, gotPassword, string(plaintexts[0].GetBytes()))
+	assert.Len(t, gotPassword, 20)
+}
+
+// TestUserBuilder_Rotate_Validation verifies bad targets and unsupported credential options are
+// rejected before the client is called.
+func TestUserBuilder_Rotate_Validation(t *testing.T) {
+	mockCli := &test.MockClient{
+		RotateAccountPasswordFunc: func(ctx context.Context, username string, password string) error {
+			t.Fatalf("unexpected client call for %q", username)
+			return nil
+		},
+	}
+	builder := newUserBuilder(mockCli)
+	userID := &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "alice"}
+
+	tests := []struct {
+		name    string
+		id      *v2.ResourceId
+		opts    *v2.LocalCredentialOptions
+		wantMsg string
+	}{
+		{"wrong resource type", &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: "alice"}, randomPasswordOptions(20), "cannot rotate credentials of resource type"},
+		{"empty resource id", &v2.ResourceId{ResourceType: userResourceType.Id, Resource: " "}, randomPasswordOptions(20), "resource id is empty"},
+		{"no credential options", userID, nil, "failed to generate password"},
+		{"unsupported credential option", userID, &v2.LocalCredentialOptions{
+			Options: &v2.LocalCredentialOptions_NoPassword_{NoPassword: &v2.LocalCredentialOptions_NoPassword{}},
+		}, "failed to generate password"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := builder.Rotate(context.Background(), tt.id, tt.opts)
+			assert.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), tt.wantMsg)
+		})
+	}
+}
+
+// TestUserBuilder_Rotate_PropagatesErrors verifies a failed password update is returned wrapped.
+func TestUserBuilder_Rotate_PropagatesErrors(t *testing.T) {
+	boom := errors.New("boom")
+	mockCli := &test.MockClient{
+		RotateAccountPasswordFunc: func(ctx context.Context, username string, password string) error {
+			return boom
+		},
+	}
+
+	_, _, err := newUserBuilder(mockCli).Rotate(context.Background(),
+		&v2.ResourceId{ResourceType: userResourceType.Id, Resource: "alice"},
+		randomPasswordOptions(20),
+	)
+	require.ErrorIs(t, err, boom)
+	assert.Contains(t, err.Error(), "failed to rotate password")
+}
+
+// TestUserBuilder_Rotate_KeepsClientErrorCode verifies a client error reaches C1 with its gRPC code
+// and typed cause intact, so an unknown or protected account is not retried as a transient failure.
+func TestUserBuilder_Rotate_KeepsClientErrorCode(t *testing.T) {
+	for name, tt := range map[string]struct {
+		code  codes.Code
+		cause error
+	}{
+		"unknown account":   {codes.NotFound, client.ErrAccountNotFound},
+		"protected account": {codes.InvalidArgument, client.ErrInvalidAccountTarget},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mockCli := &test.MockClient{
+				RotateAccountPasswordFunc: func(ctx context.Context, username string, password string) error {
+					return uhttp.WrapErrors(tt.code, "client error", fmt.Errorf("%w: %s", tt.cause, username))
+				},
+			}
+
+			_, _, err := newUserBuilder(mockCli).Rotate(context.Background(),
+				&v2.ResourceId{ResourceType: userResourceType.Id, Resource: "alice"},
+				randomPasswordOptions(20),
+			)
+			assert.Equal(t, tt.code, status.Code(err))
+			require.ErrorIs(t, err, tt.cause)
+		})
+	}
 }
