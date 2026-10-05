@@ -198,13 +198,55 @@ func TestSetAccountEnabled_AlreadyInState(t *testing.T) {
 	}
 }
 
+// TestSetAccountEnabled_FlagOnlyAccount verifies an account defined only by its
+// `accounts.<name>.enabled` key, which Argo CD lists as an account, can be disabled and enabled.
+// Enabling it keeps the key as "true" instead of removing it, which would delete the account.
+func TestSetAccountEnabled_FlagOnlyAccount(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   string
+		enabled   bool
+		want      string
+		wantWrite bool
+	}{
+		{name: "disable", current: "true", enabled: false, want: "false", wantWrite: true},
+		{name: "disable unparsable", current: "yes", enabled: false, want: "false", wantWrite: true},
+		{name: "enable", current: "false", enabled: true, want: "true", wantWrite: true},
+		{name: "enable unparsable", current: "no", enabled: true, want: "true", wantWrite: true},
+		{name: "disable already disabled", current: "false", enabled: false, want: "false"},
+		{name: "enable already enabled", current: "true", enabled: true, want: "true"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := fake.NewSimpleClientset(newArgoCDConfigMap(map[string]string{
+				"accounts.alice.enabled": tt.current,
+				"accounts.bob":           "login",
+			}))
+
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+			require.NoError(t, cli.SetAccountEnabled(ctx, "alice", tt.enabled))
+
+			data := getConfigMapData(t, k8sClient)
+			assert.Equal(t, tt.want, data["accounts.alice.enabled"])
+			assert.NotContains(t, data, "accounts.alice", "no capabilities should be added")
+			assert.Equal(t, "login", data["accounts.bob"])
+			if tt.wantWrite {
+				assert.Equal(t, 1, writeCount(k8sClient))
+			} else {
+				assert.Zero(t, writeCount(k8sClient))
+			}
+		})
+	}
+}
+
 // TestSetAccountEnabled_AccountNotDefined verifies that an account missing from argocd-cm is
 // reported as not found rather than silently succeeding.
 func TestSetAccountEnabled_AccountNotDefined(t *testing.T) {
 	for _, enabled := range []bool{true, false} {
 		for name, data := range map[string]map[string]string{
-			"other accounts only": {"accounts.bob": "login"},
-			"stale flag only":     {"accounts.alice.enabled": "false"},
+			"other accounts only": {"accounts.bob": "login", "accounts.bob.enabled": "false"},
 			"no data":             nil,
 		} {
 			t.Run(fmt.Sprintf("%s/enabled=%t", name, enabled), func(t *testing.T) {

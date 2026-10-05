@@ -58,7 +58,9 @@ Kubernetes API (see [argoproj/argo-cd#4967](https://github.com/argoproj/argo-cd/
 `disable_user` sets `accounts.<name>.enabled: "false"` in `argocd-cm`. Argo CD rejects both
 password logins and API tokens of a disabled account, so the account's password and tokens are
 left in place. `enable_user` removes the flag again (an account is enabled when the key is
-absent), restoring access exactly as it was.
+absent), restoring access exactly as it was. For an account defined only by
+`accounts.<name>.enabled` (Argo CD stores a disabled account with no capabilities this way),
+`enable_user` sets the flag to `"true"` instead, since removing it would delete the account.
 
 Both actions take one argument, `user_id`: the account name.
 
@@ -70,8 +72,8 @@ baton-argo-cd --api-url https://argocd.local --username admin --password ... \
   --invoke-action enable_user --invoke-action-args '{"user_id":"alice"}'
 ```
 
-An account that is already in the requested state is reported as success. An account that is not
-defined in `argocd-cm` fails with a not-found error.
+An account that is already in the requested state is reported as success. An account with neither
+`accounts.<name>` nor `accounts.<name>.enabled` in `argocd-cm` fails with a not-found error.
 
 ### Revoke API tokens (action)
 

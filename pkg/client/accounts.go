@@ -264,11 +264,15 @@ func (c *Client) revokeAccountToken(ctx context.Context, username string, tokenI
 // and API tokens of a disabled account, so the account's stored credentials are left in place and
 // re-enabling it restores access as it was.
 //
+// Like Argo CD, it treats either `accounts.<name>` or `accounts.<name>.enabled` as defining the
+// account; Argo CD itself stores a disabled account with no capabilities as the flag alone.
+//
 // Disabling writes an explicit "false", adding the key when it is missing and replacing it
 // otherwise. Enabling removes the key, since an account is enabled when the key is absent; this
-// matches how Argo CD itself persists the flag. An account already in the requested state is left
-// untouched. An account that is not defined in `argocd-cm` returns an error wrapping
-// ErrAccountNotFound.
+// matches how Argo CD itself persists the flag. When the flag is the account's only key, enabling
+// sets it to "true" instead, since removing it would delete the account. An account already in the
+// requested state is left untouched. An account that is not defined in `argocd-cm` returns an
+// error wrapping ErrAccountNotFound.
 func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled bool) error {
 	l := ctxzap.Extract(ctx)
 
@@ -292,11 +296,12 @@ func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled
 	accountKey := accountKeyPrefix + username
 	enabledKey := accountKey + accountEnabledSuffix
 
-	if _, ok := cm.Data[accountKey]; !ok {
+	_, hasAccount := cm.Data[accountKey]
+	currentValue, hasEnabled := cm.Data[enabledKey]
+	if !hasAccount && !hasEnabled {
 		return accountNotFoundError("%s is not defined in ConfigMap '%s'", username, argoCDConfigMapName)
 	}
 
-	currentValue, hasEnabled := cm.Data[enabledKey]
 	// Argo CD parses the flag with strconv.ParseBool. An unparsable value is never treated as
 	// already being in the requested state, so it gets overwritten.
 	current, parseErr := strconv.ParseBool(strings.TrimSpace(currentValue))
@@ -310,6 +315,9 @@ func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled
 
 	var op jsonPatchOperation
 	switch {
+	case enabled && !hasAccount:
+		enabledValue := strconv.FormatBool(true)
+		op = jsonPatchOperation{Op: jsonPatchOpReplace, Path: dataKeyPath(enabledKey), Value: &enabledValue}
 	case enabled:
 		op = jsonPatchOperation{Op: jsonPatchOpRemove, Path: dataKeyPath(enabledKey)}
 	case hasEnabled:
