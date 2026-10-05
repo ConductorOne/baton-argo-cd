@@ -127,7 +127,8 @@ func (u *userBuilder) CreateAccount(
 //  1. Revoke the account's issued API tokens through the Argo CD API. This is the only immediate
 //     revocation path, and it needs the account to still be resolvable through the API.
 //  2. Purge the account's stored credentials (password hash and token records) from `argocd-secret`.
-//  3. Remove the account's role grants and direct permissions from `policy.csv` in `argocd-rbac-cm`.
+//  3. Remove the account's role grants and direct permissions from `policy.csv` and every
+//     `policy.<x>.csv` overlay key in `argocd-rbac-cm`.
 //  4. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
 //
 // Steps 2 and 3 keep a later account created with the same name from inheriting the old
