@@ -122,16 +122,17 @@ func (u *userBuilder) CreateAccount(
 // disable_user action instead (see actions.go).
 //
 // Argo CD's Account REST API has no delete endpoint, so the account entry is removed through the
-// Kubernetes API. Deletion runs in three steps, in this order:
+// Kubernetes API. Deletion runs in four steps, in this order:
 //
 //  1. Revoke the account's issued API tokens through the Argo CD API. This is the only immediate
 //     revocation path, and it needs the account to still be resolvable through the API.
-//  2. Remove the account's role grants and direct permissions from `policy.csv` in `argocd-rbac-cm`.
-//  3. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
-//  4. Purge the account's stored credentials (password hash and token records) from `argocd-secret`.
+//  2. Purge the account's stored credentials (password hash and token records) from `argocd-secret`.
+//  3. Remove the account's role grants and direct permissions from `policy.csv` in `argocd-rbac-cm`.
+//  4. Remove the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
 //
-// Steps 2 and 4 keep a later account created with the same name from inheriting the old
-// account's roles, permissions and credentials.
+// Steps 2 and 3 keep a later account created with the same name from inheriting the old
+// account's credentials, roles and permissions. Everything is revoked before the account itself is
+// removed from `argocd-cm`, so a failed step leaves the account synced and the delete retryable.
 //
 // Each step treats an already-deleted state as success, so a retried delete converges instead of
 // failing.
@@ -155,16 +156,16 @@ func (u *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (an
 		return nil, fmt.Errorf("baton-argo-cd: failed to revoke API tokens for account %q: %w", username, err)
 	}
 
+	if err := u.client.PurgeAccountCredentials(ctx, username); err != nil {
+		return nil, fmt.Errorf("baton-argo-cd: failed to purge stored credentials for account %q: %w", username, err)
+	}
+
 	if err := u.client.RemoveAccountPolicies(ctx, username); err != nil {
 		return nil, fmt.Errorf("baton-argo-cd: failed to remove RBAC policies for account %q: %w", username, err)
 	}
 
 	if err := u.client.DeleteAccount(ctx, username); err != nil {
 		return nil, fmt.Errorf("baton-argo-cd: failed to delete account %q: %w", username, err)
-	}
-
-	if err := u.client.PurgeAccountCredentials(ctx, username); err != nil {
-		return nil, fmt.Errorf("baton-argo-cd: failed to purge stored credentials for account %q: %w", username, err)
 	}
 
 	l.Debug("Deleted Argo CD local account", zap.String("account", username))

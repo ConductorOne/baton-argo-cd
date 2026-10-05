@@ -248,7 +248,7 @@ func TestUserBuilder_Delete(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Nil(t, annos)
-	assert.Equal(t, []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}, calls)
+	assert.Equal(t, []string{"revoke-tokens", "purge-credentials", "remove-policies", "delete"}, calls)
 }
 
 // TestUserBuilder_Delete_Validation verifies malformed targets are rejected before any client call.
@@ -290,9 +290,10 @@ func TestUserBuilder_Delete_PropagatesErrors(t *testing.T) {
 		wantCalls []string
 	}{
 		{"token revocation fails", "revoke-tokens", "failed to revoke API tokens", []string{"revoke-tokens"}},
-		{"policy removal fails", "remove-policies", "failed to remove RBAC policies", []string{"revoke-tokens", "remove-policies"}},
-		{"delete fails", "delete", "failed to delete account", []string{"revoke-tokens", "remove-policies", "delete"}},
-		{"credential purge fails", "purge-credentials", "failed to purge stored credentials", []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}},
+		// A failed purge must leave the account in argocd-cm, so it keeps syncing and the delete can be retried.
+		{"credential purge fails", "purge-credentials", "failed to purge stored credentials", []string{"revoke-tokens", "purge-credentials"}},
+		{"policy removal fails", "remove-policies", "failed to remove RBAC policies", []string{"revoke-tokens", "purge-credentials", "remove-policies"}},
+		{"delete fails", "delete", "failed to delete account", []string{"revoke-tokens", "purge-credentials", "remove-policies", "delete"}},
 	}
 
 	for _, tt := range tests {
@@ -354,7 +355,7 @@ func TestUserBuilder_Delete_AccountUnknownToAPI(t *testing.T) {
 		Resource:     "alice",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"revoke-tokens", "remove-policies", "delete", "purge-credentials"}, calls)
+	assert.Equal(t, []string{"revoke-tokens", "purge-credentials", "remove-policies", "delete"}, calls)
 }
 
 func randomPasswordOptions(length int64) *v2.LocalCredentialOptions {
