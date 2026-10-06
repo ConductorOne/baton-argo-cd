@@ -37,9 +37,6 @@ jobs:
       - name: Build
         run: go build -o connector ./cmd/baton-argo-cd
 
-      - name: Run and save config output
-        run: ./connector config > config_schema.json
-
       - name: Run and save capabilities output
         run: ./connector capabilities > baton_capabilities.json
 
@@ -47,10 +44,8 @@ jobs:
         uses: EndBug/add-and-commit@v9
         with:
           default_author: github_actions
-          message: "Updating baton config schema and capabilities."
-          add: |
-            config_schema.json
-            baton_capabilities.json
+          message: "Updating baton capabilities."
+          add: "baton_capabilities.json"
 
   validate_metadata:
     if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
@@ -70,9 +65,6 @@ jobs:
       - name: Build
         run: go build -o connector ./cmd/baton-argo-cd
 
-      - name: Run and save config output
-        run: ./connector config > config_schema.json
-
       - name: Run and save capabilities output
         run: ./connector capabilities > baton_capabilities.json
 
@@ -91,14 +83,6 @@ jobs:
             CAPS_STALE=true
             echo "::warning::baton_capabilities.json differs from binary output"
             git diff -- baton_capabilities.json
-          fi
-
-          COMMITTED_CONFIG=$(git show HEAD:config_schema.json 2>/dev/null | jq -cS . 2>/dev/null || echo "")
-          GENERATED_CONFIG=$(jq -cS . config_schema.json 2>/dev/null || echo "")
-          if [ "$COMMITTED_CONFIG" != "$GENERATED_CONFIG" ]; then
-            CONFIG_STALE=true
-            echo "::warning::config_schema.json differs from binary output"
-            git diff -- config_schema.json
           fi
 
           if [ "$CAPS_STALE" = "true" ] || [ "$CONFIG_STALE" = "true" ]; then
@@ -133,12 +117,6 @@ jobs:
             HEAD_CAPS=$(jq -cS . baton_capabilities.json 2>/dev/null || echo "")
             if [ "$BASE_CAPS" != "$HEAD_CAPS" ]; then
               CAPS_CHANGED=true
-            fi
-
-            BASE_CONFIG=$(git show "$BASE_SHA:config_schema.json" 2>/dev/null | jq -cS . 2>/dev/null || echo "")
-            HEAD_CONFIG=$(jq -cS . config_schema.json 2>/dev/null || echo "")
-            if [ "$BASE_CONFIG" != "$HEAD_CONFIG" ]; then
-              CONFIG_CHANGED=true
             fi
           fi
 
