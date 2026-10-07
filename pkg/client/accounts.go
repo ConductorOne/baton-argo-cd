@@ -33,6 +33,11 @@ const (
 	accountPasswordMtimeSuffix = ".passwordMtime"
 	accountTokensSuffix        = ".tokens"
 
+	// argocd-cm keys Argo CD reads to decide whether SSO is configured.
+	argoCDURLKey        = "url"
+	argoCDDexConfigKey  = "dex.config"
+	argoCDOIDCConfigKey = "oidc.config"
+
 	// adminAccountName is the built-in Argo CD admin account. It is controlled by the top-level
 	// `admin.enabled` key rather than by `accounts.*`, so it is never managed here.
 	adminAccountName = "admin"
@@ -384,12 +389,16 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 
 	kept := make([][]string, 0, len(records))
 	var removed int
+	var removedGrants []string
 	for _, record := range records {
 		isAccountLine := len(record) > 2 &&
 			(record[0] == policyTypeGrant || record[0] == policyTypeDefinition) &&
 			record[1] == username
 		if isAccountLine {
 			removed++
+			if record[0] == policyTypeGrant {
+				removedGrants = append(removedGrants, strings.Join(record, ", "))
+			}
 			continue
 		}
 		kept = append(kept, record)
@@ -408,7 +417,61 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 		zap.String("account", username),
 		zap.Int("removed_lines", removed),
 	)
+
+	if len(removedGrants) > 0 {
+		c.warnIfSSOGroupMayShareGrants(ctx, username, removedGrants)
+	}
 	return nil
+}
+
+// warnIfSSOGroupMayShareGrants logs a warning when removed `g` lines may also have applied to an
+// SSO group. Argo CD policy subjects are untyped: when SSO is configured, a `g, <name>, <role>`
+// line also grants the role to every SSO user whose groups claim contains <name>, so removing it
+// for the local account removes it for that group too. Nothing in Argo CD lists SSO group names,
+// so the overlap cannot be confirmed; the warning lets an operator restore the group's access.
+// `p` lines alone are not affected: Argo CD only evaluates a group claim that is the subject of
+// some `g` line.
+func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username string, removedGrants []string) {
+	l := ctxzap.Extract(ctx)
+
+	configured, err := c.isSSOConfigured(ctx)
+	if err != nil {
+		l.Warn("Removed role grants of a deleted Argo CD local account; could not check whether SSO is configured, "+
+			"so an SSO group with the same name may also have lost these roles",
+			zap.String("account", username),
+			zap.Strings("removed_grants", removedGrants),
+			zap.Error(err),
+		)
+		return
+	}
+	if !configured {
+		return
+	}
+
+	l.Warn("Removed role grants of a deleted Argo CD local account; SSO is configured and Argo CD applies these lines "+
+		"to any SSO group with the same name, which has lost these roles too. Restore them with a group-specific "+
+		"policy line if such a group exists",
+		zap.String("account", username),
+		zap.Strings("removed_grants", removedGrants),
+	)
+}
+
+// isSSOConfigured reports whether `argocd-cm` configures SSO the way Argo CD's
+// ArgoCDSettings.IsSSOConfigured checks it: Dex (`dex.config` together with `url`) or an OIDC
+// provider (`oidc.config`). It only checks the keys are set, so an invalid config still counts as
+// configured, which errs toward warning. A missing ConfigMap means no SSO.
+func (c *Client) isSSOConfigured(ctx context.Context) (bool, error) {
+	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("argocd-connector: failed to get ConfigMap '%s': %w", argoCDConfigMapName, err)
+	}
+
+	dexConfigured := strings.TrimSpace(cm.Data[argoCDURLKey]) != "" && strings.TrimSpace(cm.Data[argoCDDexConfigKey]) != ""
+	oidcConfigured := strings.TrimSpace(cm.Data[argoCDOIDCConfigKey]) != ""
+	return dexConfigured || oidcConfigured, nil
 }
 
 // DeleteAccount removes an Argo CD local account from the `argocd-cm` ConfigMap, dropping both the

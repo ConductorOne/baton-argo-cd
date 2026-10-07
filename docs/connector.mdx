@@ -69,6 +69,13 @@ for good.
 - Account names may contain only alphanumerics, `-` and `_`. Names containing `.` are rejected,
   since ArgoCD cannot address them as accounts.
 - Deleting an account rewrites `policy.csv` in `argocd-rbac-cm`, which removes its `#` comment lines.
+- ArgoCD policy subjects are not typed: when SSO is configured, a role grant such as
+  `g, ci-bot, role:deployer` also applies to SSO users in a group named `ci-bot`. Deleting the
+  local account `ci-bot` therefore also removes that role from such a group. The connector cannot
+  list SSO groups to detect this, so when SSO is configured and a deletion removes role grants, it
+  logs a warning listing the removed lines. To avoid the overlap, give local accounts names that
+  cannot match an SSO group, as
+  [ArgoCD recommends](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/#local-usersaccounts).
 - Revoking tokens and rotating another account's password need the `accounts, update` ArgoCD RBAC
   permission for the connector's account. Deleting accounts also requires the `secrets` Kubernetes
   permissions described below.
