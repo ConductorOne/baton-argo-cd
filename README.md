@@ -100,14 +100,17 @@ rotation also cuts off the account's existing access.
 Deleting an account removes it permanently, in four steps:
 
 1. Revokes every API token issued to the account (`DELETE /api/v1/account/{name}/token/{id}`).
-2. Removes every `policy.csv` line in `argocd-rbac-cm` whose subject is the account - its role
+2. Purges the account's stored credentials - password hash, password mtime marker, and token
+   records - from the `argocd-secret` Secret, so they are not reused if the account name is
+   created again (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
+3. Removes every `policy.csv` line in `argocd-rbac-cm` whose subject is the account - its role
    grants (`g, <name>, <role>`) and its direct permissions (`p, <name>, ...`) - so an account
    created later with the same name inherits neither. Only exact name matches are removed. Like
    role revocation, rewriting `policy.csv` normalizes its formatting and drops `#` comment lines.
-3. Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
-4. Purges the account's stored credentials - password hash, password mtime marker, and token
-   records - from the `argocd-secret` Secret, so they are not reused if the account name is
-   created again (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
+4. Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
+
+The account is removed from `argocd-cm` last, so if an earlier step fails the delete fails and the
+account keeps syncing, and the delete can be retried.
 
 Deletion is idempotent: an account that is already gone, or has no RBAC policies or stored
 credentials, is reported as successfully deleted.
@@ -132,8 +135,8 @@ name so the connector cannot read the repository and cluster credentials that al
 `argocd` namespace.
 
 **Upgrading an existing deployment:** these Secret permissions are new. Re-apply the role before
-account deletion is used — without them the credential-purge step fails with a `403` after the
-account has already been deleted, leaving its stored credentials in place.
+account deletion is used — without them the credential-purge step fails with a `403` and the
+delete fails, leaving the account in place until the role is re-applied and the delete retried.
 
 ```yaml
 rules:
