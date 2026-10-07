@@ -674,17 +674,25 @@ func (c *Client) UpdateUserRole(ctx context.Context, userID string, roleID strin
 // Conflict if another grant or revoke changed the ConfigMap in between, instead of silently
 // overwriting that change.
 func (c *Client) updateRBACPolicy(ctx context.Context, cm *corev1.ConfigMap, records [][]string) error {
-	var buf bytes.Buffer
-	writer := csv.NewWriter(&buf)
-	if err := writer.WriteAll(records); err != nil {
-		return fmt.Errorf("argocd-connector: failed to write policy csv: %w", err)
-	}
+	return c.updateRBACPolicies(ctx, cm, map[string][][]string{policyCSVKey: records})
+}
 
+// updateRBACPolicies writes each policy key's records back on a copy of cm in a single update, so
+// every key changes together or none does. Keys not in recordsByKey are left as they are.
+func (c *Client) updateRBACPolicies(ctx context.Context, cm *corev1.ConfigMap, recordsByKey map[string][][]string) error {
 	updated := cm.DeepCopy()
 	if updated.Data == nil {
 		updated.Data = map[string]string{}
 	}
-	updated.Data[policyCSVKey] = buf.String()
+
+	for key, records := range recordsByKey {
+		var buf bytes.Buffer
+		writer := csv.NewWriter(&buf)
+		if err := writer.WriteAll(records); err != nil {
+			return fmt.Errorf("argocd-connector: failed to write %s: %w", key, err)
+		}
+		updated.Data[key] = buf.String()
+	}
 
 	if _, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("argocd-connector: failed to update rbac configmap: %w", err)
@@ -741,7 +749,13 @@ func (c *Client) UpdateUserPassword(ctx context.Context, username string, passwo
 	return nil
 }
 
-// parsePolicyCSV parses the `policy.csv` value of `argocd-rbac-cm` into its records.
+// isPolicyCSVKey reports whether an `argocd-rbac-cm` key holds policy lines Argo CD enforces:
+// `policy.csv` and every `policy.<x>.csv` overlay key, which Argo CD appends to `policy.csv`.
+func isPolicyCSVKey(key string) bool {
+	return strings.HasPrefix(key, "policy.") && strings.HasSuffix(key, ".csv")
+}
+
+// parsePolicyCSV parses a `policy.csv` or `policy.<x>.csv` value of `argocd-rbac-cm` into its records.
 func parsePolicyCSV(policyCsv string) ([][]string, error) {
 	reader := csv.NewReader(strings.NewReader(policyCsv))
 	reader.Comment = '#'

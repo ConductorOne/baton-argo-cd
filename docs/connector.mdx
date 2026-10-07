@@ -68,7 +68,8 @@ for good.
   and rotation fail with a not-found error for an account ArgoCD does not know.
 - Account names may contain only alphanumerics, `-` and `_`. Names containing `.` are rejected,
   since ArgoCD cannot address them as accounts.
-- Deleting an account rewrites `policy.csv` in `argocd-rbac-cm`, which removes its `#` comment lines.
+- Deleting an account rewrites `policy.csv` and every `policy.<x>.csv` overlay key in `argocd-rbac-cm`
+  that contains one of its lines, which removes their `#` comment lines.
 - ArgoCD policy subjects are not typed: when SSO is configured, a role grant such as
   `g, ci-bot, role:deployer` also applies to SSO users in a group named `ci-bot`. Deleting the
   local account `ci-bot` therefore also removes that role from such a group. The connector cannot

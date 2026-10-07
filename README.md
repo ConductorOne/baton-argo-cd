@@ -103,10 +103,12 @@ Deleting an account removes it permanently, in four steps:
 2. Purges the account's stored credentials - password hash, password mtime marker, and token
    records - from the `argocd-secret` Secret, so they are not reused if the account name is
    created again (see [argoproj/argo-cd#4102](https://github.com/argoproj/argo-cd/issues/4102)).
-3. Removes every `policy.csv` line in `argocd-rbac-cm` whose subject is the account - its role
-   grants (`g, <name>, <role>`) and its direct permissions (`p, <name>, ...`) - so an account
-   created later with the same name inherits neither. Only exact name matches are removed. Like
-   role revocation, rewriting `policy.csv` normalizes its formatting and drops `#` comment lines.
+3. Removes every line in `argocd-rbac-cm` whose subject is the account - its role grants
+   (`g, <name>, <role>`) and its direct permissions (`p, <name>, ...`) - from `policy.csv` and
+   every `policy.<x>.csv` overlay key, so an account created later with the same name inherits
+   neither. Only exact name matches are removed, and only keys that contain such a line are
+   rewritten. Like role revocation, rewriting a key normalizes its formatting and drops `#` comment
+   lines.
 4. Removes the `accounts.<name>` entry (and its `.enabled` flag) from `argocd-cm`.
 
 The account is removed from `argocd-cm` last, so if an earlier step fails the delete fails and the

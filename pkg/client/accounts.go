@@ -354,11 +354,13 @@ func (c *Client) SetAccountEnabled(ctx context.Context, username string, enabled
 	return nil
 }
 
-// RemoveAccountPolicies removes every `policy.csv` line in `argocd-rbac-cm` whose subject is the
-// account: its role grants (`g, <name>, <role>`) and its direct permissions
-// (`p, <name>, <resource>, <action>, <object>, <effect>`). Without this they outlive a deleted
-// account and apply to any account later created with the same name. Only exact subject matches
-// are removed. An account with no policy lines is left as is.
+// RemoveAccountPolicies removes every line in `argocd-rbac-cm` whose subject is the account: its
+// role grants (`g, <name>, <role>`) and its direct permissions
+// (`p, <name>, <resource>, <action>, <object>, <effect>`). Argo CD enforces `policy.csv` together
+// with every `policy.<x>.csv` overlay key, so all of them are cleaned. Without this the lines
+// outlive a deleted account and apply to any account later created with the same name. Only exact
+// subject matches are removed, and only keys holding such a line are rewritten. An account with no
+// policy lines is left as is.
 func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) error {
 	l := ctxzap.Extract(ctx)
 
@@ -376,32 +378,37 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 		return kubernetesError(err, "argocd-connector: failed to get rbac configmap")
 	}
 
-	policyCsv, ok := cm.Data[policyCSVKey]
-	if !ok {
-		l.Debug("RBAC ConfigMap has no policy, no account policies to remove", zap.String("account", username))
-		return nil
-	}
-
-	records, err := parsePolicyCSV(policyCsv)
-	if err != nil {
-		return err
-	}
-
-	kept := make([][]string, 0, len(records))
+	keptByKey := map[string][][]string{}
 	var removed int
 	var removedGrants []string
-	for _, record := range records {
-		isAccountLine := len(record) > 2 &&
-			(record[0] == policyTypeGrant || record[0] == policyTypeDefinition) &&
-			record[1] == username
-		if isAccountLine {
-			removed++
-			if record[0] == policyTypeGrant {
-				removedGrants = append(removedGrants, strings.Join(record, ", "))
-			}
+	for key, policyCsv := range cm.Data {
+		if !isPolicyCSVKey(key) {
 			continue
 		}
-		kept = append(kept, record)
+
+		records, err := parsePolicyCSV(policyCsv)
+		if err != nil {
+			return fmt.Errorf("%w (key %q)", err, key)
+		}
+
+		kept := make([][]string, 0, len(records))
+		for _, record := range records {
+			isAccountLine := len(record) > 2 &&
+				(record[0] == policyTypeGrant || record[0] == policyTypeDefinition) &&
+				record[1] == username
+			if isAccountLine {
+				removed++
+				if record[0] == policyTypeGrant {
+					removedGrants = append(removedGrants, strings.Join(record, ", "))
+				}
+				continue
+			}
+			kept = append(kept, record)
+		}
+
+		if len(kept) < len(records) {
+			keptByKey[key] = kept
+		}
 	}
 
 	if removed == 0 {
@@ -409,13 +416,14 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 		return nil
 	}
 
-	if err := c.updateRBACPolicy(ctx, cm, kept); err != nil {
+	if err := c.updateRBACPolicies(ctx, cm, keptByKey); err != nil {
 		return kubernetesError(err, fmt.Sprintf("argocd-connector: failed to remove RBAC policies of account %q", username))
 	}
 
 	l.Debug("Removed Argo CD local account RBAC policies",
 		zap.String("account", username),
 		zap.Int("removed_lines", removed),
+		zap.Int("rewritten_keys", len(keptByKey)),
 	)
 
 	if len(removedGrants) > 0 {

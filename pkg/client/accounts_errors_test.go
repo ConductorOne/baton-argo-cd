@@ -298,6 +298,80 @@ func TestRemoveAccountPolicies(t *testing.T) {
 	}, records)
 }
 
+// TestRemoveAccountPolicies_OverlayKeys verifies the account's lines are removed from every
+// `policy.<x>.csv` overlay key Argo CD enforces, in one update, while keys without the account's
+// lines and keys that are not policy CSVs are left byte-for-byte as they were.
+func TestRemoveAccountPolicies_OverlayKeys(t *testing.T) {
+	untouchedOverlay := "# platform team\ng, bob, role:ops\n"
+	data := map[string]string{
+		policyCSVKey:               "g, alice, role:dev\ng, bob, role:dev\n",
+		"policy.qa-overlay.csv":    "g, alice, role:qa-dev\np, alice, projects, get, *, allow\np, role:qa-dev, applications, get, */*, allow\n",
+		"policy.platform.csv":      untouchedOverlay,
+		policyDefaultKey:           "role:readonly",
+		"scopes":                   "[groups]",
+		"policy.alice.notcsv":      "g, alice, role:dev",
+		"policy.only-alice.csv":    "g, alice, role:admin\n",
+		"policy.alice-admin.csv":   "g, alice-admin, role:admin\n",
+		"accounts.alice.extra.csv": "g, alice, role:dev",
+	}
+	cm := newRBACConfigMap(nil)
+	cm.Data = data
+	k8sClient := fake.NewSimpleClientset(cm)
+
+	cli := newTestClient(k8sClient, "https://test.com", nil)
+	require.NoError(t, cli.RemoveAccountPolicies(context.Background(), "alice"))
+	assert.Equal(t, 1, writeCount(k8sClient), "every key must change in a single update")
+
+	got, err := k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(context.Background(), rbacConfigMapName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	records := func(key string) [][]string {
+		r, err := parsePolicyCSV(got.Data[key])
+		require.NoError(t, err)
+		return r
+	}
+	assert.Equal(t, [][]string{{"g", "bob", "role:dev"}}, records(policyCSVKey))
+	assert.Equal(t, [][]string{{"p", "role:qa-dev", "applications", "get", "*/*", "allow"}}, records("policy.qa-overlay.csv"))
+	assert.Empty(t, records("policy.only-alice.csv"))
+
+	for _, key := range []string{"policy.platform.csv", policyDefaultKey, "scopes", "policy.alice.notcsv", "policy.alice-admin.csv", "accounts.alice.extra.csv"} {
+		assert.Equal(t, data[key], got.Data[key], "key %q must be left as is", key)
+	}
+}
+
+// TestRemoveAccountPolicies_OnlyInOverlay verifies an account granted only through an overlay key
+// is cleaned there, while `policy.csv`, which holds none of its lines, is not rewritten.
+func TestRemoveAccountPolicies_OnlyInOverlay(t *testing.T) {
+	mainPolicy := "# main policy\ng, bob, role:dev\n"
+	cm := newRBACConfigMap(&mainPolicy)
+	cm.Data["policy.qa-overlay.csv"] = "g, alice, role:qa-dev\n"
+	k8sClient := fake.NewSimpleClientset(cm)
+
+	cli := newTestClient(k8sClient, "https://test.com", nil)
+	require.NoError(t, cli.RemoveAccountPolicies(context.Background(), "alice"))
+
+	got, err := k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(context.Background(), rbacConfigMapName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, mainPolicy, got.Data[policyCSVKey])
+	assert.Empty(t, got.Data["policy.qa-overlay.csv"])
+}
+
+// TestRemoveAccountPolicies_InvalidOverlay verifies an overlay key that cannot be parsed fails the
+// removal, naming the key, without writing anything.
+func TestRemoveAccountPolicies_InvalidOverlay(t *testing.T) {
+	mainPolicy := "g, alice, role:dev\n"
+	cm := newRBACConfigMap(&mainPolicy)
+	cm.Data["policy.broken.csv"] = "g, \"alice, role:dev\n"
+	k8sClient := fake.NewSimpleClientset(cm)
+
+	cli := newTestClient(k8sClient, "https://test.com", nil)
+	err := cli.RemoveAccountPolicies(context.Background(), "alice")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"policy.broken.csv"`)
+	assert.Zero(t, writeCount(k8sClient))
+	assert.Equal(t, mainPolicy, getRBACPolicy(t, k8sClient))
+}
+
 // TestRemoveAccountPolicies_NothingToRemove verifies an account with no policy lines, or an RBAC
 // ConfigMap with no policy at all, leaves the ConfigMap untouched.
 func TestRemoveAccountPolicies_NothingToRemove(t *testing.T) {
