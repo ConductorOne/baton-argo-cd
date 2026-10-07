@@ -797,13 +797,13 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		prefixedRoleID = rolePrefix + roleID
 	}
 
-	var removedGrant string
+	var removedGrants []string
 	for _, record := range records {
 		if len(record) > 2 && record[0] == policyTypeGrant && record[1] == userID {
 			policyRole := strings.TrimPrefix(record[2], rolePrefix)
 			if policyRole == roleID || record[2] == prefixedRoleID {
 				roleRemoved = true
-				removedGrant = strings.Join(record, ", ")
+				removedGrants = append(removedGrants, strings.Join(record, ", "))
 				continue
 			}
 		}
@@ -818,7 +818,7 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		return nil, kubernetesError(err, "argocd-connector: failed to update rbac policy")
 	}
 
-	c.warnIfRevokedGrantMayShareSSOGroup(ctx, userID, removedGrant)
+	c.warnIfRevokedGrantMayShareSSOGroup(ctx, userID, removedGrants)
 	return nil, nil
 }
 

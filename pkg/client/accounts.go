@@ -451,28 +451,29 @@ func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username stri
 }
 
 // warnIfRevokedGrantMayShareSSOGroup is the role-revoke counterpart of
-// warnIfSSOGroupMayShareGrants. A revoke removes the same shared `g` line, but its subject may be
-// an SSO group rather than a local account, and removing a group's own line needs no warning. So
-// it warns only when the subject is an Argo CD local account, judged from `argocd-cm` the same way
-// the sync tells local accounts from groups.
-func (c *Client) warnIfRevokedGrantMayShareSSOGroup(ctx context.Context, subject string, removedGrant string) {
+// warnIfSSOGroupMayShareGrants. A revoke removes the same shared `g` lines, but its subject may be
+// an SSO group rather than a local account, and removing a group's own lines needs no warning. So
+// it warns only when the subject is an Argo CD local account: the built-in `admin`, or an account
+// with an `accounts.<name>` or `accounts.<name>.enabled` key in `argocd-cm`. These are the accounts
+// Argo CD lists, which is how the sync tells local accounts from groups.
+func (c *Client) warnIfRevokedGrantMayShareSSOGroup(ctx context.Context, subject string, removedGrants []string) {
 	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// No argocd-cm means no local accounts and no SSO.
 			return
 		}
-		logSSOOverlap(ctx, subject, []string{removedGrant}, accountRoleGrantRevoked, false,
+		logSSOOverlap(ctx, subject, removedGrants, accountRoleGrantRevoked, false,
 			fmt.Errorf("argocd-connector: failed to get ConfigMap '%s': %w", argoCDConfigMapName, err))
 		return
 	}
 
 	_, hasAccount := cm.Data[accountKeyPrefix+subject]
 	_, hasEnabledFlag := cm.Data[accountKeyPrefix+subject+accountEnabledSuffix]
-	if !hasAccount && !hasEnabledFlag {
+	if !hasAccount && !hasEnabledFlag && !strings.EqualFold(subject, adminAccountName) {
 		return
 	}
-	logSSOOverlap(ctx, subject, []string{removedGrant}, accountRoleGrantRevoked, ssoConfiguredIn(cm.Data), nil)
+	logSSOOverlap(ctx, subject, removedGrants, accountRoleGrantRevoked, ssoConfiguredIn(cm.Data), nil)
 }
 
 // logSSOOverlap writes the SSO-overlap warning for removed `g` lines: an uncertain variant when

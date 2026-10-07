@@ -148,12 +148,32 @@ func TestRemoveUserRole_SSOGroupWarning(t *testing.T) {
 	tests := []struct {
 		name        string
 		subject     string
+		policy      string            // defaults to policy
 		argoCDCM    map[string]string // nil means no argocd-cm
 		getCMErr    error
 		wantWarning bool
 		wantErrLog  bool
+		wantGrants  []interface{} // defaults to the subject's single `role:dev` line
 	}{
 		{name: "local account, oidc configured", subject: "alice", argoCDCM: oidcWithAlice, wantWarning: true},
+		{
+			// The built-in admin is controlled by admin.enabled and has no accounts.admin key, but
+			// Argo CD lists it as a local account.
+			name:        "built-in admin",
+			subject:     "admin",
+			policy:      "g, admin, role:dev\ng, bob, role:dev\n",
+			argoCDCM:    map[string]string{"oidc.config": "name: Okta\n"},
+			wantWarning: true,
+		},
+		{
+			// Both spellings of the same role grant are removed, and both are reported.
+			name:        "several matching lines",
+			subject:     "alice",
+			policy:      "g, alice, dev\ng, alice, role:dev\ng, bob, role:dev\n",
+			argoCDCM:    oidcWithAlice,
+			wantWarning: true,
+			wantGrants:  []interface{}{"g, alice, dev", "g, alice, role:dev"},
+		},
 		{
 			name:    "local account, dex configured",
 			subject: "alice",
@@ -191,7 +211,11 @@ func TestRemoveUserRole_SSOGroupWarning(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objects := []runtime.Object{newRBACConfigMap(&policy)}
+			rbacPolicy := policy
+			if tt.policy != "" {
+				rbacPolicy = tt.policy
+			}
+			objects := []runtime.Object{newRBACConfigMap(&rbacPolicy)}
 			if tt.argoCDCM != nil {
 				objects = append(objects, newArgoCDConfigMap(tt.argoCDCM))
 			}
@@ -229,7 +253,11 @@ func TestRemoveUserRole_SSOGroupWarning(t *testing.T) {
 			fields := entries[0]
 			assert.Equal(t, "warn", fields["level"])
 			assert.Equal(t, tt.subject, fields["account"])
-			assert.Equal(t, []interface{}{"g, " + tt.subject + ", role:dev"}, fields["removed_grants"])
+			wantGrants := tt.wantGrants
+			if wantGrants == nil {
+				wantGrants = []interface{}{"g, " + tt.subject + ", role:dev"}
+			}
+			assert.Equal(t, wantGrants, fields["removed_grants"])
 			assert.Contains(t, fields["msg"], accountRoleGrantRevoked)
 			_, hasErr := fields["error"]
 			assert.Equal(t, tt.wantErrLog, hasErr)
