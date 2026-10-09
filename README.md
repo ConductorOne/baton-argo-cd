@@ -126,11 +126,13 @@ credentials, is reported as successfully deleted.
 - SSO/Dex-managed identities are not local accounts, so there is nothing to manage for them in
   Argo CD itself.
 - Argo CD policy subjects are untyped: when SSO is configured, `g, <name>, <role>` also grants the
-  role to SSO users whose groups claim contains `<name>`. Deleting the local account `<name>`
-  removes that grant for such a group too. Argo CD offers no way to list SSO groups, so when SSO is
-  configured (`dex.config` with `url`, or `oidc.config`, in `argocd-cm`) and a deletion removes
-  role grants, the connector logs a warning listing them. Direct permissions (`p` lines) are not
-  shared this way, since Argo CD only evaluates a group claim that is the subject of a `g` line.
+  role to SSO users whose groups claim contains `<name>`. Deleting the local account `<name>`, or
+  revoking one of its roles, removes that grant for such a group too. Argo CD offers no way to list
+  SSO groups, so when SSO is configured (`dex.config` with `url`, or `oidc.config`, in `argocd-cm`)
+  and a deletion or a role revoke removes a local account's role grants, the connector logs a
+  warning listing them. Revoking a role from an SSO group itself does not warn. Direct permissions
+  (`p` lines) are not shared this way, since Argo CD only evaluates a group claim that is the
+  subject of a `g` line.
   See Argo CD's
   [ambiguous group assignments](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/#local-usersaccounts)
   warning.
