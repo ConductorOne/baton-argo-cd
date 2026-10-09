@@ -15,7 +15,7 @@ type ArgoCdClient interface {
 	GetDefaultRole(ctx context.Context) (string, error)
 	CreateAccount(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error)
 	UpdateUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
-	RemoveUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error)
+	RemoveUserRole(ctx context.Context, userID string, roleID string, isLocalAccount bool) (annotations.Annotations, error)
 	GetRoleSubjects(ctx context.Context, roleName string) ([]string, error)
 	// Account lifecycle.
 	RevokeAccountTokens(ctx context.Context, username string) error

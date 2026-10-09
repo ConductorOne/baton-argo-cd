@@ -136,3 +136,61 @@ func TestRemoveAccountPolicies_SSOGroupWarning(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoveUserRole_SSOGroupWarning verifies revoking a local account's role grant warns that a
+// same-named SSO group may have lost it too, and revoking an SSO group's own grant does not. The
+// SSO conditions themselves are covered by TestRemoveAccountPolicies_SSOGroupWarning.
+func TestRemoveUserRole_SSOGroupWarning(t *testing.T) {
+	tests := []struct {
+		name           string
+		isLocalAccount bool
+		wantWarning    bool
+	}{
+		{name: "local account", isLocalAccount: true, wantWarning: true},
+		{name: "sso group", isLocalAccount: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := "g, alice, role:dev\ng, bob, role:dev\n"
+			k8sClient := fake.NewSimpleClientset(
+				newRBACConfigMap(&policy),
+				newArgoCDConfigMap(map[string]string{"oidc.config": "name: Okta\n"}),
+			)
+			ctx, warnings := captureWarnings(t)
+
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+			annos, err := cli.RemoveUserRole(ctx, "alice", "dev", tt.isLocalAccount)
+			require.NoError(t, err)
+			assert.Nil(t, annos)
+			assert.Equal(t, "g,bob,role:dev\n", getRBACPolicy(t, k8sClient))
+
+			entries := warnings()
+			if !tt.wantWarning {
+				assert.Empty(t, entries)
+				return
+			}
+			require.Len(t, entries, 1)
+			assert.Contains(t, entries[0]["msg"], accountRoleGrantRevoked)
+			assert.Equal(t, "alice", entries[0]["account"])
+			assert.Equal(t, []interface{}{"g, alice, role:dev"}, entries[0]["removed_grants"])
+		})
+	}
+}
+
+// TestRemoveUserRole_AlreadyRevokedDoesNotWarn verifies a revoke that finds no line to remove
+// writes nothing and does not warn, even for a local account with SSO configured.
+func TestRemoveUserRole_AlreadyRevokedDoesNotWarn(t *testing.T) {
+	policy := "g, bob, role:dev\n"
+	k8sClient := fake.NewSimpleClientset(
+		newRBACConfigMap(&policy),
+		newArgoCDConfigMap(map[string]string{"accounts.alice": "login", "oidc.config": "name: Okta\n"}),
+	)
+	ctx, warnings := captureWarnings(t)
+
+	cli := newTestClient(k8sClient, "https://test.com", nil)
+	annos, err := cli.RemoveUserRole(ctx, "alice", "dev", true)
+	require.NoError(t, err)
+	assert.NotNil(t, annos)
+	assert.Empty(t, warnings())
+}
