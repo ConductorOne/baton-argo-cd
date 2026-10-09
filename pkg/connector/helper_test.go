@@ -47,3 +47,42 @@ func TestParseAccountResource_Status(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateCredentials(t *testing.T) {
+	t.Run("supplied password is returned unchanged", func(t *testing.T) {
+		password, err := generateCredentials(plaintextPasswordOptions("abc"))
+		require.NoError(t, err)
+		assert.Equal(t, "abc", password)
+	})
+
+	t.Run("random password is raised to the minimum length", func(t *testing.T) {
+		password, err := generateCredentials(randomPasswordOptions(4))
+		require.NoError(t, err)
+		assert.Len(t, password, PasswordMinLength)
+	})
+
+	t.Run("random password keeps a longer requested length", func(t *testing.T) {
+		password, err := generateCredentials(randomPasswordOptions(24))
+		require.NoError(t, err)
+		assert.Len(t, password, 24)
+	})
+
+	tests := []struct {
+		name    string
+		opts    *v2.LocalCredentialOptions
+		wantMsg string
+	}{
+		{"empty supplied password", plaintextPasswordOptions(""), "plaintext password is empty"},
+		{"nil options", nil, "unsupported credential option"},
+		{"no password option", &v2.LocalCredentialOptions{
+			Options: &v2.LocalCredentialOptions_NoPassword_{NoPassword: &v2.LocalCredentialOptions_NoPassword{}},
+		}, "unsupported credential option"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := generateCredentials(tt.opts)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMsg)
+		})
+	}
+}

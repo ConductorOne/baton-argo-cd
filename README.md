@@ -90,9 +90,11 @@ baton-argo-cd --api-url https://argocd.local --username admin --password ... \
 
 ### Rotate password (credential rotation)
 
-The connector supports credential rotation for local accounts with a random password
-(`PUT /api/v1/account/password`); C1 stores the new password in a vault, as it does for newly
-created accounts. Argo CD rejects every session and API token issued before a password change, so
+The connector supports credential rotation for local accounts (`PUT /api/v1/account/password`)
+with either a random password, which C1 stores in a vault as it does for newly created accounts, or
+an encrypted password C1 supplies (Set credential automation step, Password Push), which the SDK
+decrypts before the connector sets it. A supplied password is not sent back to a vault. Account
+creation accepts the same two options. Argo CD rejects every session and API token issued before a password change, so
 rotation also cuts off the account's existing access.
 
 ### Delete

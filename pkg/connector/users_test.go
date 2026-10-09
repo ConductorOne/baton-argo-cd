@@ -93,6 +93,22 @@ func TestUserBuilder_CreateAccountCapabilityDetails(t *testing.T) {
 	assert.Nil(t, annos)
 
 	assert.Contains(t, details.SupportedCredentialOptions, v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD)
+	assert.Contains(t, details.SupportedCredentialOptions, v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_ENCRYPTED_PASSWORD)
+	assert.Equal(t, v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD, details.PreferredCredentialOption)
+}
+
+// TestUserBuilder_RotateCapabilityDetails verifies rotation accepts both a random and an encrypted
+// password.
+func TestUserBuilder_RotateCapabilityDetails(t *testing.T) {
+	details, annos, err := newUserBuilder(nil).RotateCapabilityDetails(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Nil(t, annos)
+
+	assert.ElementsMatch(t, []v2.CapabilityDetailCredentialOption{
+		v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
+		v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_ENCRYPTED_PASSWORD,
+	}, details.SupportedCredentialOptions)
 	assert.Equal(t, v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD, details.PreferredCredentialOption)
 }
 
@@ -126,6 +142,34 @@ func TestUserBuilder_CreateAccount(t *testing.T) {
 		require.Len(t, plaintextData, 1)
 		assert.Equal(t, "password", plaintextData[0].Name)
 		assert.NotEmpty(t, plaintextData[0].Bytes)
+	})
+
+	t.Run("success with supplied password", func(t *testing.T) {
+		var gotPassword string
+		mockCli := &test.MockClient{
+			CreateAccountFunc: func(ctx context.Context, username string, password string) (*client.Account, annotations.Annotations, error) {
+				gotPassword = password
+				return &client.Account{Name: username, Enabled: true, Capabilities: []string{"login"}}, nil, nil
+			},
+		}
+
+		_, plaintextData, _, err := newUserBuilder(mockCli).CreateAccount(context.Background(),
+			&v2.AccountInfo{Login: "test-user"},
+			plaintextPasswordOptions("Supplied-Pass-123"),
+		)
+		require.NoError(t, err)
+		assert.Equal(t, "Supplied-Pass-123", gotPassword)
+		require.Len(t, plaintextData, 1)
+		assert.Equal(t, "Supplied-Pass-123", string(plaintextData[0].GetBytes()))
+	})
+
+	t.Run("error empty supplied password", func(t *testing.T) {
+		_, _, _, err := newUserBuilder(nil).CreateAccount(context.Background(),
+			&v2.AccountInfo{Login: "test-user"},
+			plaintextPasswordOptions(""),
+		)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "baton-argo-cd: failed to generate password")
 	})
 
 	t.Run("error missing username", func(t *testing.T) {
@@ -366,6 +410,14 @@ func randomPasswordOptions(length int64) *v2.LocalCredentialOptions {
 	}
 }
 
+func plaintextPasswordOptions(password string) *v2.LocalCredentialOptions {
+	return &v2.LocalCredentialOptions{
+		Options: &v2.LocalCredentialOptions_PlaintextPassword_{
+			PlaintextPassword: &v2.LocalCredentialOptions_PlaintextPassword{PlaintextPassword: password},
+		},
+	}
+}
+
 // TestUserBuilder_Rotate verifies a random password is generated, set on the trimmed account name,
 // and returned for the vault.
 func TestUserBuilder_Rotate(t *testing.T) {
@@ -388,6 +440,27 @@ func TestUserBuilder_Rotate(t *testing.T) {
 	assert.Equal(t, "password", plaintexts[0].GetName())
 	assert.Equal(t, gotPassword, string(plaintexts[0].GetBytes()))
 	assert.Len(t, gotPassword, 20)
+}
+
+// TestUserBuilder_Rotate_SuppliedPassword verifies a supplied plaintext password is set as-is.
+func TestUserBuilder_Rotate_SuppliedPassword(t *testing.T) {
+	var gotUser, gotPassword string
+	mockCli := &test.MockClient{
+		RotateAccountPasswordFunc: func(ctx context.Context, username string, password string) error {
+			gotUser, gotPassword = username, password
+			return nil
+		},
+	}
+
+	plaintexts, _, err := newUserBuilder(mockCli).Rotate(context.Background(),
+		&v2.ResourceId{ResourceType: userResourceType.Id, Resource: "alice"},
+		plaintextPasswordOptions("short"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "alice", gotUser)
+	assert.Equal(t, "short", gotPassword)
+	require.Len(t, plaintexts, 1)
+	assert.Equal(t, "short", string(plaintexts[0].GetBytes()))
 }
 
 // TestUserBuilder_Rotate_Validation verifies bad targets and unsupported credential options are
@@ -414,6 +487,7 @@ func TestUserBuilder_Rotate_Validation(t *testing.T) {
 		{"unsupported credential option", userID, &v2.LocalCredentialOptions{
 			Options: &v2.LocalCredentialOptions_NoPassword_{NoPassword: &v2.LocalCredentialOptions_NoPassword{}},
 		}, "failed to generate password"},
+		{"empty supplied password", userID, plaintextPasswordOptions(""), "plaintext password is empty"},
 	}
 
 	for _, tt := range tests {

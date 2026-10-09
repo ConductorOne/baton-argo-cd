@@ -48,13 +48,21 @@ func parseAccountResource(account *client.Account) (*v2.Resource, error) {
 	)
 }
 
-// generateCredentials generates a random password based on the credential options.
+// generateCredentials returns the password to set: the supplied plaintext password, or a random one.
 func generateCredentials(credentialOptions *v2.LocalCredentialOptions) (string, error) {
-	if credentialOptions == nil || credentialOptions.GetRandomPassword() == nil {
-		return "", errors.New("unsupported credential option: only random password is supported")
+	if plaintextPassword := credentialOptions.GetPlaintextPassword(); plaintextPassword != nil {
+		password := plaintextPassword.GetPlaintextPassword()
+		if password == "" {
+			return "", errors.New("plaintext password is empty")
+		}
+		return password, nil
 	}
 
 	randomPassword := credentialOptions.GetRandomPassword()
+	if randomPassword == nil {
+		return "", errors.New("unsupported credential option: only random or encrypted password is supported")
+	}
+
 	length := randomPassword.GetLength()
 	if length < PasswordMinLength {
 		length = PasswordMinLength
