@@ -15,10 +15,11 @@ sidebarTitle: "ArgoCD"
 
 The ArgoCD connector supports [automatic account provisioning and deprovisioning](/product/admin/account-provisioning).
 
-When a new account is created by C1, the account's password will be sent to a [vault](/product/admin/vaults).
+C1 can create a new account with a random password, which is sent to a [vault](/product/admin/vaults),
+or with a password it supplies.
 
-The connector also supports credential rotation for local accounts: C1 sets a new random password
-and sends it to a vault. ArgoCD rejects every session and API token issued before a password
+The connector also supports credential rotation for local accounts: C1 sets either a new random
+password, which is sent to a vault, or a password it supplies. ArgoCD rejects every session and API token issued before a password
 change, so rotation also cuts off the account's existing access.
 
 ## Connector actions
@@ -47,7 +48,7 @@ permissions described in [Gather ArgoCD credentials](#gather-argocd-credentials)
   accepts again once it is enabled.
 - **Revoke API tokens** (the `revoke_tokens` action) removes the account's API tokens without
   touching the account itself.
-- **Rotate password** (credential rotation) sets a new random password and invalidates every
+- **Rotate password** (credential rotation) sets a new password (random or C1-supplied) and invalidates every
   session and API token issued before it.
 - **Delete** (account deprovisioning) is permanent. It revokes the account's API tokens, purges
   its stored credentials, removes its role grants and direct permissions, and then removes the

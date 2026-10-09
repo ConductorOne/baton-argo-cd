@@ -67,11 +67,12 @@ func (u *userBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 	return nil, "", nil, nil
 }
 
-// CreateAccountCapabilityDetails declares support for account provisioning with random password generation.
+// CreateAccountCapabilityDetails declares support for account provisioning with a random or C1-supplied password.
 func (u *userBuilder) CreateAccountCapabilityDetails(ctx context.Context) (*v2.CredentialDetailsAccountProvisioning, annotations.Annotations, error) {
 	return &v2.CredentialDetailsAccountProvisioning{
 		SupportedCredentialOptions: []v2.CapabilityDetailCredentialOption{
 			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
+			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_ENCRYPTED_PASSWORD,
 		},
 		PreferredCredentialOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
 	}, nil, nil
@@ -95,7 +96,7 @@ func (u *userBuilder) CreateAccount(
 
 	password, err := generateCredentials(credentialOptions)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to generate password: %w", err)
+		return nil, nil, nil, status.Errorf(codes.InvalidArgument, "baton-argo-cd: failed to generate password: %v", err)
 	}
 
 	newUser, annos, err := u.client.CreateAccount(ctx, username, password)
@@ -179,14 +180,15 @@ func (u *userBuilder) RotateCapabilityDetails(ctx context.Context) (*v2.Credenti
 	return &v2.CredentialDetailsCredentialRotation{
 		SupportedCredentialOptions: []v2.CapabilityDetailCredentialOption{
 			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
+			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_ENCRYPTED_PASSWORD,
 		},
 		PreferredCredentialOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_RANDOM_PASSWORD,
 	}, nil, nil
 }
 
-// Rotate sets a new random password for an Argo CD local account and returns it so C1 can store
-// it in a vault. Argo CD rejects every session and API token issued before a password change, so
-// rotation also cuts off the account's existing access.
+// Rotate sets a new password (random or C1-supplied) for an Argo CD local account and returns it
+// so C1 can store a random one in a vault. Argo CD rejects every session and API token issued
+// before a password change, so rotation also cuts off the account's existing access.
 func (u *userBuilder) Rotate(
 	ctx context.Context,
 	resourceId *v2.ResourceId,

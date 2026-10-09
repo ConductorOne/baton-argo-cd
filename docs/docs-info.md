@@ -22,8 +22,9 @@ While developing the connector, please fill out this form. This information is n
    > The `revoke_tokens` action revokes an account's API tokens without changing anything else, for
    > example alongside `disable_user` so a later `enable_user` does not bring old tokens back.
    >
-   > The connector also supports credential rotation: it sets a new random password for a local
-   > account, which C1 stores in a vault. ArgoCD rejects every session and API token issued before a
+   > The connector also supports credential rotation: it sets either a new random password for a
+   > local account, which C1 stores in a vault, or a password C1 supplies (from a Set credential
+   > automation step or Password Push), which is not sent back to a vault. ArgoCD rejects every session and API token issued before a
    > password change.
    >
    > The built-in `admin` account cannot be disabled, enabled, rotated, stripped of its tokens or
