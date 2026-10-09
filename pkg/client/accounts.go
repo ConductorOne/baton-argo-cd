@@ -427,10 +427,16 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 	)
 
 	if len(removedGrants) > 0 {
-		c.warnIfSSOGroupMayShareGrants(ctx, username, removedGrants)
+		c.warnIfSSOGroupMayShareGrants(ctx, username, removedGrants, deletedAccountGrantsRemoved)
 	}
 	return nil
 }
+
+// Leading clauses of the SSO-overlap warning, one per way a local account's `g` lines are removed.
+const (
+	deletedAccountGrantsRemoved = "Removed role grants of a deleted Argo CD local account"
+	accountRoleGrantRevoked     = "Revoked a role grant of an Argo CD local account"
+)
 
 // warnIfSSOGroupMayShareGrants logs a warning when removed `g` lines may also have applied to an
 // SSO group. Argo CD policy subjects are untyped: when SSO is configured, a `g, <name>, <role>`
@@ -438,13 +444,45 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 // for the local account removes it for that group too. Nothing in Argo CD lists SSO group names,
 // so the overlap cannot be confirmed; the warning lets an operator restore the group's access.
 // `p` lines alone are not affected: Argo CD only evaluates a group claim that is the subject of
-// some `g` line.
-func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username string, removedGrants []string) {
+// some `g` line. event names how the lines were removed.
+func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username string, removedGrants []string, event string) {
+	configured, err := c.isSSOConfigured(ctx)
+	logSSOOverlap(ctx, username, removedGrants, event, configured, err)
+}
+
+// warnIfRevokedGrantMayShareSSOGroup is the role-revoke counterpart of
+// warnIfSSOGroupMayShareGrants. A revoke removes the same shared `g` lines, but its subject may be
+// an SSO group rather than a local account, and removing a group's own lines needs no warning. So
+// it warns only when the subject is an Argo CD local account: the built-in `admin`, or an account
+// with an `accounts.<name>` or `accounts.<name>.enabled` key in `argocd-cm`. These are the accounts
+// Argo CD lists, which is how the sync tells local accounts from groups.
+func (c *Client) warnIfRevokedGrantMayShareSSOGroup(ctx context.Context, subject string, removedGrants []string) {
+	cm, err := c.k8sClient.CoreV1().ConfigMaps(argocdNamespace).Get(ctx, argoCDConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// No argocd-cm means no local accounts and no SSO.
+			return
+		}
+		logSSOOverlap(ctx, subject, removedGrants, accountRoleGrantRevoked, false,
+			fmt.Errorf("argocd-connector: failed to get ConfigMap '%s': %w", argoCDConfigMapName, err))
+		return
+	}
+
+	_, hasAccount := cm.Data[accountKeyPrefix+subject]
+	_, hasEnabledFlag := cm.Data[accountKeyPrefix+subject+accountEnabledSuffix]
+	if !hasAccount && !hasEnabledFlag && !strings.EqualFold(subject, adminAccountName) {
+		return
+	}
+	logSSOOverlap(ctx, subject, removedGrants, accountRoleGrantRevoked, ssoConfiguredIn(cm.Data), nil)
+}
+
+// logSSOOverlap writes the SSO-overlap warning for removed `g` lines: an uncertain variant when
+// the SSO configuration could not be read, nothing when SSO is not configured.
+func logSSOOverlap(ctx context.Context, username string, removedGrants []string, event string, configured bool, err error) {
 	l := ctxzap.Extract(ctx)
 
-	configured, err := c.isSSOConfigured(ctx)
 	if err != nil {
-		l.Warn("Removed role grants of a deleted Argo CD local account; could not check whether SSO is configured, "+
+		l.Warn(event+"; could not check whether SSO is configured, "+
 			"so an SSO group with the same name may also have lost these roles",
 			zap.String("account", username),
 			zap.Strings("removed_grants", removedGrants),
@@ -456,7 +494,7 @@ func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username stri
 		return
 	}
 
-	l.Warn("Removed role grants of a deleted Argo CD local account; SSO is configured and Argo CD applies these lines "+
+	l.Warn(event+"; SSO is configured and Argo CD applies these lines "+
 		"to any SSO group with the same name, which has lost these roles too. Restore them with a group-specific "+
 		"policy line if such a group exists",
 		zap.String("account", username),
@@ -476,10 +514,14 @@ func (c *Client) isSSOConfigured(ctx context.Context) (bool, error) {
 		}
 		return false, fmt.Errorf("argocd-connector: failed to get ConfigMap '%s': %w", argoCDConfigMapName, err)
 	}
+	return ssoConfiguredIn(cm.Data), nil
+}
 
-	dexConfigured := strings.TrimSpace(cm.Data[argoCDURLKey]) != "" && strings.TrimSpace(cm.Data[argoCDDexConfigKey]) != ""
-	oidcConfigured := strings.TrimSpace(cm.Data[argoCDOIDCConfigKey]) != ""
-	return dexConfigured || oidcConfigured, nil
+// ssoConfiguredIn applies isSSOConfigured's check to the data of an `argocd-cm` already read.
+func ssoConfiguredIn(data map[string]string) bool {
+	dexConfigured := strings.TrimSpace(data[argoCDURLKey]) != "" && strings.TrimSpace(data[argoCDDexConfigKey]) != ""
+	oidcConfigured := strings.TrimSpace(data[argoCDOIDCConfigKey]) != ""
+	return dexConfigured || oidcConfigured
 }
 
 // DeleteAccount removes an Argo CD local account from the `argocd-cm` ConfigMap, dropping both the

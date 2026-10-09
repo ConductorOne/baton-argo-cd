@@ -136,3 +136,148 @@ func TestRemoveAccountPolicies_SSOGroupWarning(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoveUserRole_SSOGroupWarning verifies revoking a local account's role grant warns that a
+// same-named SSO group may have lost it too, under the same conditions as the delete path. A
+// revoke whose subject is not a local account is an SSO group's own line and does not warn. The
+// revoke itself always succeeds.
+func TestRemoveUserRole_SSOGroupWarning(t *testing.T) {
+	policy := "g, alice, role:dev\ng, bob, role:dev\n"
+	oidcWithAlice := map[string]string{"accounts.alice": "login", "oidc.config": "name: Okta\nissuer: https://example.okta.com\n"}
+
+	tests := []struct {
+		name        string
+		subject     string
+		policy      string            // defaults to policy
+		argoCDCM    map[string]string // nil means no argocd-cm
+		getCMErr    error
+		wantWarning bool
+		wantErrLog  bool
+		wantGrants  []interface{} // defaults to the subject's single `role:dev` line
+	}{
+		{name: "local account, oidc configured", subject: "alice", argoCDCM: oidcWithAlice, wantWarning: true},
+		{
+			// The built-in admin is controlled by admin.enabled and has no accounts.admin key, but
+			// Argo CD lists it as a local account.
+			name:        "built-in admin",
+			subject:     "admin",
+			policy:      "g, admin, role:dev\ng, bob, role:dev\n",
+			argoCDCM:    map[string]string{"oidc.config": "name: Okta\n"},
+			wantWarning: true,
+		},
+		{
+			// Both spellings of the same role grant are removed, and both are reported.
+			name:        "several matching lines",
+			subject:     "alice",
+			policy:      "g, alice, dev\ng, alice, role:dev\ng, bob, role:dev\n",
+			argoCDCM:    oidcWithAlice,
+			wantWarning: true,
+			wantGrants:  []interface{}{"g, alice, dev", "g, alice, role:dev"},
+		},
+		{
+			name:    "local account, dex configured",
+			subject: "alice",
+			argoCDCM: map[string]string{
+				"accounts.alice": "login",
+				"url":            "https://argocd.example.com",
+				"dex.config":     "connectors:\n- type: github\n  id: github\n  name: GitHub\n",
+			},
+			wantWarning: true,
+		},
+		{
+			// An account defined only by its enabled flag is still a local account.
+			name:        "local account defined by its enabled flag",
+			subject:     "alice",
+			argoCDCM:    map[string]string{"accounts.alice.enabled": "true", "oidc.config": "name: Okta\n"},
+			wantWarning: true,
+		},
+		{name: "local account, no sso", subject: "alice", argoCDCM: map[string]string{"accounts.alice": "login"}},
+		{
+			// bob has no accounts.bob key: the line is an SSO group's own grant.
+			name:     "group subject",
+			subject:  "bob",
+			argoCDCM: oidcWithAlice,
+		},
+		{name: "argocd-cm missing", subject: "alice"},
+		{
+			name:        "argocd-cm unreadable",
+			subject:     "alice",
+			argoCDCM:    oidcWithAlice,
+			getCMErr:    apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, argoCDConfigMapName, nil),
+			wantWarning: true,
+			wantErrLog:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rbacPolicy := policy
+			if tt.policy != "" {
+				rbacPolicy = tt.policy
+			}
+			objects := []runtime.Object{newRBACConfigMap(&rbacPolicy)}
+			if tt.argoCDCM != nil {
+				objects = append(objects, newArgoCDConfigMap(tt.argoCDCM))
+			}
+			k8sClient := fake.NewSimpleClientset(objects...)
+			if tt.getCMErr != nil {
+				// Fail only reads of argocd-cm, so argocd-rbac-cm is still read and updated.
+				k8sClient.PrependReactor("get", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					if action.(k8stesting.GetAction).GetName() == argoCDConfigMapName {
+						return true, nil, tt.getCMErr
+					}
+					return false, nil, nil
+				})
+			}
+
+			ctx, warnings := captureWarnings(t)
+
+			cli := newTestClient(k8sClient, "https://test.com", nil)
+			annos, err := cli.RemoveUserRole(ctx, tt.subject, "dev")
+			require.NoError(t, err)
+			assert.Nil(t, annos)
+
+			records, err := parsePolicyCSV(getRBACPolicy(t, k8sClient))
+			require.NoError(t, err)
+			for _, record := range records {
+				assert.NotEqual(t, tt.subject, record[1], "the revoked line must be removed either way")
+			}
+
+			entries := warnings()
+			if !tt.wantWarning {
+				assert.Empty(t, entries)
+				return
+			}
+
+			require.Len(t, entries, 1)
+			fields := entries[0]
+			assert.Equal(t, "warn", fields["level"])
+			assert.Equal(t, tt.subject, fields["account"])
+			wantGrants := tt.wantGrants
+			if wantGrants == nil {
+				wantGrants = []interface{}{"g, " + tt.subject + ", role:dev"}
+			}
+			assert.Equal(t, wantGrants, fields["removed_grants"])
+			assert.Contains(t, fields["msg"], accountRoleGrantRevoked)
+			_, hasErr := fields["error"]
+			assert.Equal(t, tt.wantErrLog, hasErr)
+		})
+	}
+}
+
+// TestRemoveUserRole_AlreadyRevokedDoesNotWarn verifies a revoke that finds no line to remove
+// writes nothing and does not warn, even for a local account with SSO configured.
+func TestRemoveUserRole_AlreadyRevokedDoesNotWarn(t *testing.T) {
+	policy := "g, bob, role:dev\n"
+	k8sClient := fake.NewSimpleClientset(
+		newRBACConfigMap(&policy),
+		newArgoCDConfigMap(map[string]string{"accounts.alice": "login", "oidc.config": "name: Okta\n"}),
+	)
+	ctx, warnings := captureWarnings(t)
+
+	cli := newTestClient(k8sClient, "https://test.com", nil)
+	annos, err := cli.RemoveUserRole(ctx, "alice", "dev")
+	require.NoError(t, err)
+	assert.NotNil(t, annos)
+	assert.Empty(t, warnings())
+}
