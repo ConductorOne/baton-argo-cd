@@ -213,9 +213,10 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
+			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string, isLocalAccount bool) (annotations.Annotations, error) {
 				assert.Equal(t, "test-user", userID)
 				assert.Equal(t, "role-to-revoke", roleID)
+				assert.True(t, isLocalAccount)
 				return nil, nil
 			},
 		}
@@ -225,9 +226,26 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 		assert.Nil(t, annos)
 	})
 
+	t.Run("group principal is not a local account", func(t *testing.T) {
+		groupGrant := &v2.Grant{
+			Principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: "test-group"}},
+			Entitlement: grantToRevoke.Entitlement,
+		}
+		mockCli := &test.MockClient{
+			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string, isLocalAccount bool) (annotations.Annotations, error) {
+				assert.Equal(t, "test-group", userID)
+				assert.False(t, isLocalAccount)
+				return nil, nil
+			},
+		}
+		builder := newRoleBuilder(mockCli)
+		_, err := builder.Revoke(context.Background(), groupGrant)
+		require.NoError(t, err)
+	})
+
 	t.Run("already revoked", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
+			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string, isLocalAccount bool) (annotations.Annotations, error) {
 				return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 			},
 		}
@@ -240,7 +258,7 @@ func TestRoleBuilder_Revoke(t *testing.T) {
 
 	t.Run("remove user role fails", func(t *testing.T) {
 		mockCli := &test.MockClient{
-			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
+			RemoveUserRoleFunc: func(ctx context.Context, userID string, roleID string, isLocalAccount bool) (annotations.Annotations, error) {
 				return nil, errors.New("remove error")
 			},
 		}

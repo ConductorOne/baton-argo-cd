@@ -427,10 +427,16 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 	)
 
 	if len(removedGrants) > 0 {
-		c.warnIfSSOGroupMayShareGrants(ctx, username, removedGrants)
+		c.warnIfSSOGroupMayShareGrants(ctx, username, removedGrants, deletedAccountGrantsRemoved)
 	}
 	return nil
 }
+
+// Leading clauses of the SSO-overlap warning, one per way a local account's `g` lines are removed.
+const (
+	deletedAccountGrantsRemoved = "Removed role grants of a deleted Argo CD local account"
+	accountRoleGrantRevoked     = "Revoked a role grant of an Argo CD local account"
+)
 
 // warnIfSSOGroupMayShareGrants logs a warning when removed `g` lines may also have applied to an
 // SSO group. Argo CD policy subjects are untyped: when SSO is configured, a `g, <name>, <role>`
@@ -438,13 +444,13 @@ func (c *Client) RemoveAccountPolicies(ctx context.Context, username string) err
 // for the local account removes it for that group too. Nothing in Argo CD lists SSO group names,
 // so the overlap cannot be confirmed; the warning lets an operator restore the group's access.
 // `p` lines alone are not affected: Argo CD only evaluates a group claim that is the subject of
-// some `g` line.
-func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username string, removedGrants []string) {
+// some `g` line. event names how the lines were removed.
+func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username string, removedGrants []string, event string) {
 	l := ctxzap.Extract(ctx)
 
 	configured, err := c.isSSOConfigured(ctx)
 	if err != nil {
-		l.Warn("Removed role grants of a deleted Argo CD local account; could not check whether SSO is configured, "+
+		l.Warn(event+"; could not check whether SSO is configured, "+
 			"so an SSO group with the same name may also have lost these roles",
 			zap.String("account", username),
 			zap.Strings("removed_grants", removedGrants),
@@ -456,7 +462,7 @@ func (c *Client) warnIfSSOGroupMayShareGrants(ctx context.Context, username stri
 		return
 	}
 
-	l.Warn("Removed role grants of a deleted Argo CD local account; SSO is configured and Argo CD applies these lines "+
+	l.Warn(event+"; SSO is configured and Argo CD applies these lines "+
 		"to any SSO group with the same name, which has lost these roles too. Restore them with a group-specific "+
 		"policy line if such a group exists",
 		zap.String("account", username),

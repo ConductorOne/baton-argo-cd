@@ -173,7 +173,9 @@ func (r *roleBuilder) Revoke(ctx context.Context, g *v2.Grant) (annotations.Anno
 	userID := g.Principal.Id.Resource
 	roleID := g.Entitlement.Resource.Id.Resource
 
-	annos, err := r.client.RemoveUserRole(ctx, userID, roleID)
+	// The sync emits local accounts as user principals and SSO groups as group principals.
+	isLocalAccount := g.Principal.Id.ResourceType == userResourceType.Id
+	annos, err := r.client.RemoveUserRole(ctx, userID, roleID, isLocalAccount)
 	if err != nil {
 		return annos, fmt.Errorf("failed to remove user role: %w", err)
 	}

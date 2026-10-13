@@ -771,8 +771,9 @@ func parsePolicyCSV(policyCsv string) ([][]string, error) {
 
 // RemoveUserRole removes a role grant from a user in the `argocd-rbac-cm` ConfigMap.
 // It reads the existing `policy.csv`, removes the grant, and patches the ConfigMap
-// using the Kubernetes SDK.
-func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID string) (annotations.Annotations, error) {
+// using the Kubernetes SDK. isLocalAccount reports whether userID is an Argo CD local account
+// rather than an SSO group; only then can a same-named SSO group lose the role too.
+func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID string, isLocalAccount bool) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 	cm, err := c.GetRBACConfigMap(ctx)
 	if err != nil {
@@ -797,11 +798,13 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		prefixedRoleID = rolePrefix + roleID
 	}
 
+	var removedGrants []string
 	for _, record := range records {
 		if len(record) > 2 && record[0] == policyTypeGrant && record[1] == userID {
 			policyRole := strings.TrimPrefix(record[2], rolePrefix)
 			if policyRole == roleID || record[2] == prefixedRoleID {
 				roleRemoved = true
+				removedGrants = append(removedGrants, strings.Join(record, ", "))
 				continue
 			}
 		}
@@ -816,6 +819,9 @@ func (c *Client) RemoveUserRole(ctx context.Context, userID string, roleID strin
 		return nil, kubernetesError(err, "argocd-connector: failed to update rbac policy")
 	}
 
+	if isLocalAccount {
+		c.warnIfSSOGroupMayShareGrants(ctx, userID, removedGrants, accountRoleGrantRevoked)
+	}
 	return nil, nil
 }
 

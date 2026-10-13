@@ -202,7 +202,7 @@ func TestKubernetesErrors_Codes(t *testing.T) {
 			name: "revoke, rbac configmap update conflict", verb: "update", resource: "configmaps",
 			err: apierrors.NewConflict(configMaps, rbacConfigMapName, nil),
 			operation: func(c *Client) error {
-				_, err := c.RemoveUserRole(context.Background(), "alice", "dev")
+				_, err := c.RemoveUserRole(context.Background(), "alice", "dev", true)
 				return err
 			},
 			want: codes.Aborted,
