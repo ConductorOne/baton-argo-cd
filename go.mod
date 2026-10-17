@@ -1,11 +1,9 @@
 module github.com/conductorone/baton-argo-cd
 
-go 1.27.1
-
-toolchain go1.27.2
+go 1.27.2
 
 require (
-	github.com/conductorone/baton-sdk v0.40.0
+	github.com/conductorone/baton-sdk v0.41.0
 	github.com/ennyjfrick/ruleguard-logfatal v0.0.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
